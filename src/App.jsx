@@ -3192,8 +3192,11 @@ function ReservationsScreen() {
               const next = new Date(calYear, calMonth, day+1);
               return reservations.find(r=>r.unitId===uid&&r.checkIn<next&&r.checkOut>d);
             };
-            const isCheckIn  = (uid,day) => { const r=getResByDay(uid,day); if(!r) return false; return r.checkIn.getDate()===day&&r.checkIn.getMonth()===calMonth&&r.checkIn.getFullYear()===calYear; };
-            const isCheckOut = (uid,day) => { const r=getResByDay(uid,day); if(!r) return false; return r.checkOut.getDate()===day&&r.checkOut.getMonth()===calMonth&&r.checkOut.getFullYear()===calYear; };
+            const sameDay = (d,day) => d.getDate()===day&&d.getMonth()===calMonth&&d.getFullYear()===calYear;
+            const getCheckIn  = (uid,day) => reservations.find(r=>r.unitId===uid&&sameDay(r.checkIn,day));
+            const getCheckOut = (uid,day) => reservations.find(r=>r.unitId===uid&&sameDay(r.checkOut,day));
+            const isCheckIn  = (uid,day) => !!getCheckIn(uid,day);
+            const isCheckOut = (uid,day) => !!getCheckOut(uid,day);
             return (
               <div>
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,background:'var(--dark2)',borderRadius:12,padding:'10px 14px'}}>
@@ -3225,15 +3228,20 @@ function ReservationsScreen() {
                           <td style={{padding:'2px 8px',fontWeight:800,fontSize:9,color:'var(--gold)',position:'sticky',left:0,background:'var(--surface)',zIndex:1,whiteSpace:'nowrap',letterSpacing:.2}}>{uname(uid)}</td>
                           {days.map(d=>{
                             const res  = getResByDay(uid,d);
-                            const cin  = isCheckIn(uid,d);
-                            const cout = isCheckOut(uid,d);
+                            const cinRes  = getCheckIn(uid,d);
+                            const coutRes = getCheckOut(uid,d);
+                            const cin  = !!cinRes;
+                            const cout = !!coutRes;
+                            const both = cin && cout; // mismo día: sale uno, entra otro
                             const isToday=d===now.getDate()&&calMonth===now.getMonth()&&calYear===now.getFullYear();
                             const dow=new Date(calYear,calMonth,d).getDay();
                             const isWknd=dow===0||dow===6;
                             let bg,border='none',title='';
-                            if (cin)       { bg='#2d6e4e'; title=res.guest; }
-                            else if (cout) { bg='rgba(184,50,50,.5)'; title=res?.guest||''; }
-                            else if (res)  { bg='rgba(45,110,78,.25)'; title=res.guest; }
+                            const OUT='rgba(184,50,50,.55)', IN='#2d6e4e', BUSY='rgba(45,110,78,.25)';
+                            if (both)      { bg=`linear-gradient(90deg, ${OUT} 0 50%, ${IN} 50% 100%)`; title=`Sale: ${coutRes.guest} · Entra: ${cinRes.guest}`; }
+                            else if (cin)  { bg=IN; title=`Entra: ${cinRes.guest}`; }
+                            else if (cout) { bg=OUT; title=`Sale: ${coutRes.guest}`; }
+                            else if (res)  { bg=BUSY; title=res.guest; }
                             else           { bg=isWknd?'rgba(201,150,58,.06)':'transparent'; }
                             if (isToday)   { border='1.5px solid var(--gold)'; }
                             return (
@@ -3247,8 +3255,9 @@ function ReservationsScreen() {
                                   transition:'opacity .1s',
                                   cursor:res?'pointer':'default',
                                 }}>
-                                  {cin&&<span style={{fontSize:6,color:'#fff',fontWeight:900,letterSpacing:.3}}>IN</span>}
-                                  {cout&&!cin&&<span style={{fontSize:6,color:'rgba(255,255,255,.8)',fontWeight:900,letterSpacing:.3}}>OUT</span>}
+                                  {both&&<span style={{fontSize:6,color:'#fff',fontWeight:900}}>⇄</span>}
+                                  {!both&&cin&&<span style={{fontSize:6,color:'#fff',fontWeight:900,letterSpacing:.3}}>IN</span>}
+                                  {!both&&cout&&<span style={{fontSize:6,color:'rgba(255,255,255,.85)',fontWeight:900,letterSpacing:.3}}>OUT</span>}
                                 </div>
                               </td>
                             );
@@ -3259,7 +3268,7 @@ function ReservationsScreen() {
                   </table>
                 </div>
                 <div style={{display:'flex',gap:14,marginTop:10,flexWrap:'wrap',padding:'0 2px'}}>
-                  {[['#2d6e4e','Check-in'],['rgba(45,110,78,.25)','Ocupada'],['rgba(184,50,50,.5)','Check-out'],['transparent','Libre']].map(([c,l])=>(
+                  {[['#2d6e4e','Check-in'],['rgba(45,110,78,.25)','Ocupada'],['rgba(184,50,50,.55)','Check-out'],['linear-gradient(90deg, rgba(184,50,50,.55) 0 50%, #2d6e4e 50% 100%)','Sale/Entra'],['transparent','Libre']].map(([c,l])=>(
                     <div key={l} style={{display:'flex',alignItems:'center',gap:6}}>
                       <div style={{width:16,height:12,borderRadius:3,background:c,border:'1px solid var(--border)'}}/>
                       <span style={{fontSize:10,color:'var(--muted)',fontWeight:600}}>{l}</span>
