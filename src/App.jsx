@@ -275,6 +275,7 @@ const HOSTAWAY_MAP = {
   'portaalsole1':    [1],
   'portaalsole1-old':[1],
   'portaalsole-sub1':[1],
+  'portaalsole-sub-test-old':[1],
   'portaalsole2':    [2],
   'portaalsole3':    [3],
   'portaalsole4':    [4],
@@ -3116,12 +3117,36 @@ function ReservationsScreen() {
                   const thisYr = new Date().getFullYear();
                   const newTotal = calcYearIncome(res, thisYr);
 
+                  // Desglose por unidad del año actual (para comparación detallada)
+                  const calcByUnit = (rlist, yr) => {
+                    const map = {};
+                    rlist.filter(r=>r.checkOut.getFullYear()===yr).forEach(r=>{
+                      map[r.unitId] = (map[r.unitId]||0) + parseIncome(r.income);
+                    });
+                    return map;
+                  };
+                  const newByUnit = calcByUnit(res, thisYr);
+
                   // Leer snapshot anterior (si existe)
                   let snapshotDiff = null;
+                  let unitChanges = null;
                   try {
                     const prev = JSON.parse(localStorage.getItem('pas_income_snapshot'));
                     if (prev && prev.year===thisYr && typeof prev.total==='number') {
                       snapshotDiff = { prevTotal: prev.total, diff: newTotal - prev.total, date: prev.date };
+                      // Comparar unidad por unidad (solo si el snapshot anterior tiene desglose)
+                      if (prev.byUnit && typeof prev.byUnit==='object') {
+                        const allUids = new Set([...Object.keys(prev.byUnit), ...Object.keys(newByUnit)]);
+                        const changes = [];
+                        allUids.forEach(uid=>{
+                          const before = prev.byUnit[uid]||0;
+                          const after  = newByUnit[uid]||0;
+                          const d = after - before;
+                          if (Math.abs(d) >= 1) changes.push({ uid:Number(uid), before, after, diff:d });
+                        });
+                        changes.sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff));
+                        if (changes.length>0) unitChanges = changes;
+                      }
                     }
                   } catch(e) {}
 
@@ -3131,11 +3156,11 @@ function ReservationsScreen() {
                   if (r1.ok && r2.ok) {
                     setReservations(res);
                     setCancellations(canc);
-                    // Guardar nuevo snapshot
+                    // Guardar nuevo snapshot (con desglose por unidad)
                     localStorage.setItem('pas_income_snapshot', JSON.stringify({
-                      year: thisYr, total: newTotal, date: new Date().toLocaleDateString('es-VE')
+                      year: thisYr, total: newTotal, byUnit: newByUnit, date: new Date().toLocaleDateString('es-VE')
                     }));
-                    setImportResult({ ok:true, stats, imported:res.length, importedCanc:canc.length, snapshotDiff, newTotal });
+                    setImportResult({ ok:true, stats, imported:res.length, importedCanc:canc.length, snapshotDiff, unitChanges, newTotal });
                   } else {
                     setImportResult({ ok:false, error:(r1.error||r2.error||'Error desconocido') });
                   }
@@ -3838,6 +3863,29 @@ function ReservationsScreen() {
                     <div style={{fontSize:9,color:'var(--muted)',marginTop:3,fontStyle:'italic'}}>Guardado como referencia. La próxima carga mostrará el cambio.</div>
                   </div>
                 ) : null}
+
+                {/* Detalle de cambios por unidad */}
+                {importResult.unitChanges && importResult.unitChanges.length>0 && (
+                  <div style={{background:'var(--bg)',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+                    <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,fontWeight:700,marginBottom:8}}>Cambios por unidad</div>
+                    <div style={{maxHeight:180,overflowY:'auto'}} className="hide-scroll">
+                      {importResult.unitChanges.map((c,i)=>{
+                        const up = c.diff>=0;
+                        return (
+                          <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:i<importResult.unitChanges.length-1?'1px solid var(--border)':'none'}}>
+                            <div>
+                              <div style={{fontSize:12,fontWeight:700,color:'var(--text)'}}>{uname(c.uid)}</div>
+                              <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{fmtMoney(c.before)} → {fmtMoney(c.after)}</div>
+                            </div>
+                            <div style={{fontSize:13,fontWeight:800,color:up?'var(--done)':'var(--urgent)',flexShrink:0,marginLeft:8}}>
+                              {up?'▲ +':'▼ '}{fmtMoney(Math.abs(c.diff))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 <div style={{background:'var(--bg)',borderRadius:10,padding:'12px 14px',marginBottom:12}}>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
