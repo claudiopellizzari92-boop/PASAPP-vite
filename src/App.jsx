@@ -3026,6 +3026,7 @@ function ReservationsScreen() {
     return isNaN(n) ? 0 : n;
   };
   const fmtMoney = n => '$'+n.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});
+  const fmtShort = iso => { const [y,m,d]=iso.split('-').map(Number); const MM=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']; return `${d} ${MM[m-1]}`; };
 
   // Occupied units right now
   const occupiedNow = rentableUnits.filter(uid=>
@@ -3127,6 +3128,23 @@ function ReservationsScreen() {
                   };
                   const newByUnit = calcByUnit(res, thisYr);
 
+                  // Reservas por unidad (para ver qué reserva causó cada cambio)
+                  const calcResByUnit = (rlist, yr) => {
+                    const map = {};
+                    rlist.filter(r=>r.checkOut.getFullYear()===yr).forEach(r=>{
+                      const uid = r.unitId;
+                      if (!map[uid]) map[uid] = [];
+                      map[uid].push({
+                        g: r.guest,
+                        ci: r.checkIn.toISOString().slice(0,10),
+                        co: r.checkOut.toISOString().slice(0,10),
+                        inc: parseIncome(r.income),
+                      });
+                    });
+                    return map;
+                  };
+                  const newResByUnit = calcResByUnit(res, thisYr);
+
                   // Leer snapshot anterior (si existe)
                   let snapshotDiff = null;
                   let unitChanges = null;
@@ -3134,15 +3152,31 @@ function ReservationsScreen() {
                     const prev = JSON.parse(localStorage.getItem('pas_income_snapshot'));
                     if (prev && prev.year===thisYr && typeof prev.total==='number') {
                       snapshotDiff = { prevTotal: prev.total, diff: newTotal - prev.total, date: prev.date };
-                      // Comparar unidad por unidad (solo si el snapshot anterior tiene desglose)
-                      if (prev.byUnit && typeof prev.byUnit==='object') {
-                        const allUids = new Set([...Object.keys(prev.byUnit), ...Object.keys(newByUnit)]);
+                      // Comparar unidad por unidad con detalle de reservas (si el snapshot tiene resByUnit)
+                      if (prev.resByUnit && typeof prev.resByUnit==='object') {
+                        const keyOf = r => `${r.g}|${r.ci}|${r.co}`;
+                        const allUids = new Set([...Object.keys(prev.resByUnit), ...Object.keys(newResByUnit)]);
                         const changes = [];
-                        allUids.forEach(uid=>{
-                          const before = prev.byUnit[uid]||0;
-                          const after  = newByUnit[uid]||0;
-                          const d = after - before;
-                          if (Math.abs(d) >= 1) changes.push({ uid:Number(uid), before, after, diff:d });
+                        allUids.forEach(uidStr=>{
+                          const uid = Number(uidStr);
+                          const beforeList = prev.resByUnit[uidStr] || [];
+                          const afterList  = newResByUnit[uidStr] || [];
+                          const beforeMap = {}; beforeList.forEach(r=>{ beforeMap[keyOf(r)]=r; });
+                          const afterMap  = {}; afterList.forEach(r=>{ afterMap[keyOf(r)]=r; });
+                          const resChanges = [];
+                          afterList.forEach(r=>{
+                            const b = beforeMap[keyOf(r)];
+                            if (!b) resChanges.push({ ...r, delta:r.inc, type:'add' });
+                            else if (Math.abs(r.inc-b.inc)>=1) resChanges.push({ ...r, delta:r.inc-b.inc, type:'mod' });
+                          });
+                          beforeList.forEach(r=>{ if(!afterMap[keyOf(r)]) resChanges.push({ ...r, delta:-r.inc, type:'del' }); });
+                          const beforeTotal = beforeList.reduce((s,r)=>s+r.inc,0);
+                          const afterTotal  = afterList.reduce((s,r)=>s+r.inc,0);
+                          const d = afterTotal - beforeTotal;
+                          if (Math.abs(d)>=1 || resChanges.length>0) {
+                            resChanges.sort((a,b)=>a.ci.localeCompare(b.ci));
+                            changes.push({ uid, before:beforeTotal, after:afterTotal, diff:d, res:resChanges });
+                          }
                         });
                         changes.sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff));
                         if (changes.length>0) unitChanges = changes;
@@ -3156,9 +3190,9 @@ function ReservationsScreen() {
                   if (r1.ok && r2.ok) {
                     setReservations(res);
                     setCancellations(canc);
-                    // Guardar nuevo snapshot (con desglose por unidad)
+                    // Guardar nuevo snapshot (con desglose y reservas por unidad)
                     localStorage.setItem('pas_income_snapshot', JSON.stringify({
-                      year: thisYr, total: newTotal, byUnit: newByUnit, date: new Date().toLocaleDateString('es-VE')
+                      year: thisYr, total: newTotal, byUnit: newByUnit, resByUnit: newResByUnit, date: new Date().toLocaleDateString('es-VE')
                     }));
                     setImportResult({ ok:true, stats, imported:res.length, importedCanc:canc.length, snapshotDiff, unitChanges, newTotal });
                   } else {
@@ -3868,18 +3902,34 @@ function ReservationsScreen() {
                 {importResult.unitChanges && importResult.unitChanges.length>0 && (
                   <div style={{background:'var(--bg)',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
                     <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,fontWeight:700,marginBottom:8}}>Cambios por unidad</div>
-                    <div style={{maxHeight:180,overflowY:'auto'}} className="hide-scroll">
+                    <div style={{maxHeight:240,overflowY:'auto'}} className="hide-scroll">
                       {importResult.unitChanges.map((c,i)=>{
                         const up = c.diff>=0;
                         return (
-                          <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:i<importResult.unitChanges.length-1?'1px solid var(--border)':'none'}}>
-                            <div>
-                              <div style={{fontSize:12,fontWeight:700,color:'var(--text)'}}>{uname(c.uid)}</div>
-                              <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{fmtMoney(c.before)} → {fmtMoney(c.after)}</div>
+                          <div key={i} style={{padding:'7px 0',borderBottom:i<importResult.unitChanges.length-1?'1px solid var(--border)':'none'}}>
+                            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                              <div style={{fontSize:12,fontWeight:800,color:'var(--text)'}}>{uname(c.uid)}</div>
+                              <div style={{fontSize:13,fontWeight:800,color:up?'var(--done)':'var(--urgent)',flexShrink:0,marginLeft:8}}>
+                                {up?'▲ +':'▼ '}{fmtMoney(Math.abs(c.diff))}
+                              </div>
                             </div>
-                            <div style={{fontSize:13,fontWeight:800,color:up?'var(--done)':'var(--urgent)',flexShrink:0,marginLeft:8}}>
-                              {up?'▲ +':'▼ '}{fmtMoney(Math.abs(c.diff))}
-                            </div>
+                            {c.res && c.res.length>0 && (
+                              <div style={{marginTop:3,paddingLeft:6}}>
+                                {c.res.map((r,j)=>{
+                                  const rUp = r.delta>=0;
+                                  return (
+                                    <div key={j} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'2px 0',gap:8}}>
+                                      <div style={{fontSize:10,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,minWidth:0}}>
+                                        {r.type==='del'?'✕ ':r.type==='mod'?'~ ':''}{r.g} · {fmtShort(r.ci)} - {fmtShort(r.co)}
+                                      </div>
+                                      <div style={{fontSize:11,fontWeight:700,color:rUp?'var(--done)':'var(--urgent)',flexShrink:0}}>
+                                        {rUp?'+':'−'}{fmtMoney(Math.abs(r.delta))}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
