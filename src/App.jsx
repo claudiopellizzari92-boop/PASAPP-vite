@@ -397,6 +397,19 @@ const SPECIAL   = {100:'Recepción',101:'Áreas Comunes'};
 const uname     = id => SPECIAL[id] ?? `PAS ${id}`;
 const pColor    = p => p==='urgente'?'#b83232':p==='normal'?'#c9963a':p==='programado'?'#2d6e4e':'#2471a3';
 
+// Notificación compatible con Android y escritorio.
+// En Android, `new Notification()` está prohibido (crashea la app);
+// hay que usar el service worker: registration.showNotification().
+const showNotif = async (title, opts) => {
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg && reg.showNotification) { await reg.showNotification(title, opts); return; }
+    }
+    new Notification(title, opts); // fallback escritorio sin SW
+  } catch (e) { console.log('No se pudo mostrar la notificación:', e); }
+};
+
 const CATS = [
   {id:'plomeria',label:'Plomería'},{id:'electricidad',label:'Electricidad'},
   {id:'pintura',label:'Pintura / Acabados'},{id:'carpinteria',label:'Carpintería'},
@@ -2720,12 +2733,12 @@ function DashboardScreen({ onNavigate }) {
     const urgent  = tasks.filter(t=>t.priority==='urgente'&&t.status!=='completado');
     const notify = () => {
       if (overdue.length > 0) {
-        new Notification('Porta Al Sole', {
+        showNotif('Porta Al Sole', {
           body: overdue.length + ' tarea(s) vencida(s): ' + overdue.slice(0,2).map(t=>t.title).join(', '),
           icon: 'apple-touch-icon.png', tag: 'overdue',
         });
       } else if (urgent.length > 0) {
-        new Notification('Porta Al Sole', {
+        showNotif('Porta Al Sole', {
           body: urgent.length + ' tarea(s) urgente(s) pendiente(s)',
           icon: 'apple-touch-icon.png', tag: 'urgent',
         });
@@ -2753,7 +2766,7 @@ function DashboardScreen({ onNavigate }) {
       let body = `Hoy: ${partes.join(' y ')}.`;
       if (unidadesIn)  body += `\n✈ Entran: ${unidadesIn}`;
       if (unidadesOut) body += `\n🚪 Salen: ${unidadesOut}`;
-      new Notification('🏠 Movimientos de hoy — Porta Al Sole', {
+      showNotif('🏠 Movimientos de hoy — Porta Al Sole', {
         body, icon: 'apple-touch-icon.png', tag: 'movimientos-dia',
       });
       localStorage.setItem('pas_movimientos_aviso', hoyStr);
