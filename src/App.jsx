@@ -3989,6 +3989,65 @@ function ReservationsScreen() {
   );
 }
 
+/* ERROR BOUNDARY - convierte la pantalla negra en un error legible */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, info: null };
+    this.onGlobalError = this.onGlobalError.bind(this);
+    this.onRejection = this.onRejection.bind(this);
+  }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { this.setState({ error, info }); }
+  onGlobalError(e) {
+    // Errores fuera del render de React (timers, listeners, etc.)
+    if (!this.state.error) this.setState({ error: e.error || new Error(e.message || 'Error desconocido') });
+  }
+  onRejection(e) {
+    // Promesas rechazadas sin catch (fetch, async/await)
+    if (!this.state.error) this.setState({ error: e.reason instanceof Error ? e.reason : new Error(String(e.reason)) });
+  }
+  componentDidMount() {
+    window.addEventListener('error', this.onGlobalError);
+    window.addEventListener('unhandledrejection', this.onRejection);
+  }
+  componentWillUnmount() {
+    window.removeEventListener('error', this.onGlobalError);
+    window.removeEventListener('unhandledrejection', this.onRejection);
+  }
+  render() {
+    if (this.state.error) {
+      const err = this.state.error;
+      const msg = (err && err.message) || String(err);
+      const stack = (err && err.stack) || '';
+      return (
+        <div style={{minHeight:'100%',background:'#1a1208',color:'#fff',padding:'24px 18px',fontFamily:'sans-serif',display:'flex',flexDirection:'column',gap:14}}>
+          <div style={{fontSize:34}}>⚠️</div>
+          <div style={{fontSize:18,fontWeight:800,color:'#c9963a'}}>La app encontró un error</div>
+          <div style={{fontSize:12,color:'rgba(255,255,255,.6)',lineHeight:1.5}}>
+            Sacale captura a esta pantalla y mandala para poder arreglarlo.
+          </div>
+          <div style={{background:'rgba(184,50,50,.12)',border:'1px solid rgba(184,50,50,.35)',borderRadius:10,padding:'12px 14px',fontSize:12,color:'#ff9a9a',fontWeight:700,wordBreak:'break-word'}}>
+            {msg}
+          </div>
+          {stack&&(
+            <pre style={{background:'rgba(255,255,255,.05)',borderRadius:10,padding:'10px 12px',fontSize:9,color:'rgba(255,255,255,.45)',overflow:'auto',maxHeight:200,whiteSpace:'pre-wrap',wordBreak:'break-word',margin:0}}>
+              {stack.split('\n').slice(0,8).join('\n')}
+            </pre>
+          )}
+          <button onClick={()=>{ this.setState({error:null,info:null}); }} style={{background:'rgba(255,255,255,.08)',color:'#fff',border:'1px solid rgba(255,255,255,.15)',borderRadius:10,padding:'12px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+            Intentar continuar
+          </button>
+          <button onClick={()=>window.location.reload()} style={{background:'#c9963a',color:'#1a1208',border:'none',borderRadius:10,padding:'12px',fontSize:14,fontWeight:800,cursor:'pointer'}}>
+            Recargar la app
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 /* APP */
 function App() {
   const { user, loading } = useAuth();
@@ -4051,5 +4110,13 @@ function App() {
   );
 }
 
+function AppWithBoundary() {
+  return (
+    <ErrorBoundary>
+      <App/>
+    </ErrorBoundary>
+  );
+}
+
 export { AuthProvider };
-export default App;
+export default AppWithBoundary;
