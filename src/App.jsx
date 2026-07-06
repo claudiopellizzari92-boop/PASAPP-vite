@@ -439,6 +439,74 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     return true;
   });
 }
+// ── Parser de CSV de QuickBooks (Lista de transacciones por proveedor) ──
+const parseQBFields = (l) => {
+  const out=[]; let cur=''; let inQ=false;
+  for (const ch of l.replace(/\r$/,'')) {
+    if (ch==='"') { inQ=!inQ; continue; }
+    if (ch===',' && !inQ) { out.push(cur.trim()); cur=''; continue; }
+    cur+=ch;
+  }
+  out.push(cur.trim());
+  return out;
+};
+
+const guessExpCategory = (nota) => {
+  if (/limpieza|lavander[íi]a\b/i.test(nota)) return 'limpieza';
+  if (/gas\b|luz|agua|el[ée]ctric|internet|wifi|cable|servicio de/i.test(nota)) return 'servicios';
+  if (/suministro|reemplazo|repuesto|compra|lavadora|secadora|nevera|a\.?\s?c\.?|aire|equipo/i.test(nota)) return 'repuestos';
+  if (/reparaci|mantenimiento|plagas|revisi|instalaci/i.test(nota)) return 'mantenimiento';
+  return 'otro';
+};
+
+const QB_UNIT_IDS = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20];
+const parseQuickBooksCSV = (csvText) => {
+  const lines = csvText.split('\n');
+  const rows = [];
+  let vendor = '';
+  let headerFound = false;
+  for (const line of lines) {
+    if (!headerFound) {
+      if (line.includes('Fecha') && line.includes('Importe')) headerFound = true;
+      continue;
+    }
+    const f = parseQBFields(line);
+    if (f[0]) {
+      // fila de proveedor o de total
+      if (!f[0].startsWith('Total para')) vendor = f[0];
+      continue;
+    }
+    const dateM = (f[1]||'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (!dateM) continue;
+    const tipo = f[2]||'';
+    const nota = f[5]||'';
+    const amt = parseFloat((f[7]||'').replace(/[^0-9.\-]/g,''));
+    if (isNaN(amt) || amt===0) continue;
+    // Detectar unidades mencionadas: "Casa N° 17", "Apto 01", "N°4"...
+    const found = new Set();
+    let m;
+    const re1 = /(?:casa|apto|apt\.?|unidad|pas)\s*(?:n\s*[°º*]?\s*)?0?(\d{1,2})/gi;
+    const re2 = /n\s*[°º]\s*0?(\d{1,2})/gi;
+    while ((m = re1.exec(nota))) { const n=parseInt(m[1]); if(QB_UNIT_IDS.includes(n)) found.add(n); }
+    while ((m = re2.exec(nota))) { const n=parseInt(m[1]); if(QB_UNIT_IDS.includes(n)) found.add(n); }
+    // "Factura de proveedor" y "Gasto" = gasto real (incluir).
+    // "Pago de facturas..." = pago de una factura ya contada (excluir para no duplicar).
+    const esGasto = /factura de proveedor/i.test(tipo) || /^gasto$/i.test(tipo);
+    const units = [...found];
+    rows.push({
+      date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
+      vendor, tipo,
+      concept: nota || `(${vendor})`,
+      amount: Math.abs(amt),
+      units,
+      unit: units[0] || 101, // por defecto Áreas Comunes si no se detectó
+      category: guessExpCategory(nota),
+      include: esGasto,
+    });
+  }
+  return rows;
+};
+
 const SPECIAL   = {100:'Recepción',101:'Áreas Comunes'};
 const uname     = id => SPECIAL[id] ?? `PAS ${id}`;
 const pColor    = p => p==='urgente'?'#b83232':p==='normal'?'#c9963a':p==='programado'?'#2d6e4e':'#2471a3';
@@ -3103,6 +3171,9 @@ function ReservationsScreen() {
   const [showExpForm, setShowExpForm] = useState(false);
   const [expBusy, setExpBusy] = useState(false);
   const [expF, setExpF] = useState({unitId:1,concept:'',amount:'',category:'mantenimiento',date:new Date().toISOString().slice(0,10)});
+  const [qbRows, setQbRows] = useState(null);      // filas parseadas del CSV de QuickBooks
+  const [qbBusy, setQbBusy] = useState(false);
+  const [qbProgress, setQbProgress] = useState('');
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -3655,9 +3726,30 @@ function ReservationsScreen() {
                   <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
                     <div className="dash-section-title" style={{marginBottom:0}}>💸 Gastos — {incMonth!==null?MONTHS[incMonth]+' '+incYear:incYear}</div>
                     {expenses!==null&&(
-                      <button onClick={()=>setShowExpForm(f=>!f)} style={{background:showExpForm?'var(--border)':'var(--gold)',color:showExpForm?'var(--muted)':'#1a1208',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:800,cursor:'pointer'}}>
-                        {showExpForm?'Cancelar':'+ Gasto'}
-                      </button>
+                      <div style={{display:'flex',gap:6}}>
+                        <label style={{background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:8,padding:'6px 10px',fontSize:11,fontWeight:800,cursor:'pointer'}}>
+                          ⬆ QuickBooks
+                          <input type="file" accept=".csv" style={{display:'none'}} onChange={e=>{
+                            const file=e.target.files[0]; if(!file) return;
+                            const rd=new FileReader();
+                            rd.onload=ev=>{
+                              const parsed = parseQuickBooksCSV(ev.target.result);
+                              if (parsed.length===0) { alert('No se encontraron transacciones. ¿Es el reporte "Lista de transacciones por proveedor" de QuickBooks?'); return; }
+                              // Marcar duplicados contra gastos ya registrados
+                              const existing = new Set((expenses||[]).map(x=>`${x.date}|${x.amount.toFixed(2)}|${x.concept}`));
+                              parsed.forEach(r=>{
+                                if (existing.has(`${r.date}|${r.amount.toFixed(2)}|${r.concept}`)) { r.dup=true; r.include=false; }
+                              });
+                              setQbRows(parsed);
+                            };
+                            rd.readAsText(file);
+                            e.target.value='';
+                          }}/>
+                        </label>
+                        <button onClick={()=>setShowExpForm(f=>!f)} style={{background:showExpForm?'var(--border)':'var(--gold)',color:showExpForm?'var(--muted)':'#1a1208',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:800,cursor:'pointer'}}>
+                          {showExpForm?'Cancelar':'+ Gasto'}
+                        </button>
+                      </div>
                     )}
                   </div>
 
@@ -3756,6 +3848,107 @@ function ReservationsScreen() {
                             ))}
                           </div>
                         )}
+
+                        {/* ── Vista previa de importación QuickBooks ── */}
+                        {qbRows&&(()=>{
+                          const inc = qbRows.filter(r=>r.include);
+                          const totalInc = inc.reduce((s,r)=>s+r.amount,0);
+                          const toggleAll = (v) => setQbRows(rows=>rows.map(r=>r.dup?r:{...r,include:v}));
+                          const updRow = (i,patch) => setQbRows(rows=>rows.map((r,j)=>j===i?{...r,...patch}:r));
+
+                          const doImport = async () => {
+                            setQbBusy(true);
+                            // Expandir multi-unidad: dividir el monto entre las unidades
+                            const finalList = [];
+                            inc.forEach(r=>{
+                              const us = r.units.length>1 ? r.units : [r.unit];
+                              const amt = r.units.length>1 ? r.amount/r.units.length : r.amount;
+                              us.forEach(u=>finalList.push({
+                                unitId: u,
+                                concept: r.concept.slice(0,200) + (r.units.length>1?` (dividido /${r.units.length})`:''),
+                                amount: Math.round(amt*100)/100,
+                                category: r.category,
+                                date: r.date,
+                              }));
+                            });
+                            // Intentar carga masiva; si el backend no la tiene, ir de a uno
+                            let done = 0, failed = 0;
+                            try {
+                              setQbProgress(`Importando ${finalList.length} gastos...`);
+                              const r = await fetch(`${API}/expenses/bulk`, {
+                                method:'POST',
+                                headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${localStorage.getItem('ps_token')}` },
+                                body: JSON.stringify({ expenses: finalList })
+                              });
+                              if (r.ok) { done = finalList.length; }
+                              else throw new Error('no bulk');
+                            } catch {
+                              for (let i=0;i<finalList.length;i++) {
+                                setQbProgress(`Importando ${i+1} de ${finalList.length}...`);
+                                const r = await addExpense(finalList[i]);
+                                if (r.ok) done++; else failed++;
+                              }
+                            }
+                            await fetchExpenses();
+                            setQbBusy(false);
+                            setQbProgress('');
+                            setQbRows(null);
+                            alert(`Importación completa: ${done} gastos registrados${failed?`, ${failed} fallaron`:''}.`);
+                          };
+
+                          return (
+                            <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&!qbBusy&&setQbRows(null)}>
+                              <div style={{background:'var(--surface)',borderRadius:14,padding:'16px',maxWidth:420,width:'94%',maxHeight:'85vh',display:'flex',flexDirection:'column'}}>
+                                <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:4}}>Importar de QuickBooks</div>
+                                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10,lineHeight:1.4}}>
+                                  {qbRows.length} transacciones · <strong style={{color:'var(--gold)'}}>{inc.length} seleccionadas</strong> ({fmtMoney(totalInc)}).
+                                  Los pagos de facturas se excluyen para no contar doble.
+                                  {qbRows.some(r=>r.dup)&&' Los ya registrados aparecen marcados.'}
+                                </div>
+                                <div style={{display:'flex',gap:6,marginBottom:8}}>
+                                  <button onClick={()=>toggleAll(true)} style={{flex:1,fontSize:10,fontWeight:700,padding:'5px',borderRadius:7,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Marcar todos</button>
+                                  <button onClick={()=>toggleAll(false)} style={{flex:1,fontSize:10,fontWeight:700,padding:'5px',borderRadius:7,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Desmarcar todos</button>
+                                </div>
+                                <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:4}} className="hide-scroll">
+                                  {qbRows.map((r,i)=>(
+                                    <div key={i} style={{display:'flex',gap:8,alignItems:'flex-start',padding:'7px 8px',borderRadius:9,background:r.include?'var(--bg)':'transparent',opacity:r.dup?0.45:r.include?1:0.55,border:'1px solid var(--border)'}}>
+                                      <input type="checkbox" checked={r.include} disabled={qbBusy} onChange={e=>updRow(i,{include:e.target.checked})} style={{marginTop:2,accentColor:'#c9963a',flexShrink:0}}/>
+                                      <div style={{flex:1,minWidth:0}}>
+                                        <div style={{fontSize:11,fontWeight:600,color:'var(--text)',lineHeight:1.3,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{r.concept}</div>
+                                        <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>
+                                          {r.date} · {r.vendor.slice(0,26)}{r.dup?' · YA REGISTRADO':''}
+                                        </div>
+                                        <div style={{display:'flex',gap:5,marginTop:4,alignItems:'center'}}>
+                                          {r.units.length>1?(
+                                            <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'2px 7px',borderRadius:6}}>
+                                              {r.units.map(u=>uname(u)).join(' + ')} (dividido)
+                                            </span>
+                                          ):(
+                                            <select value={r.unit} disabled={qbBusy} onChange={e=>updRow(i,{unit:Number(e.target.value)})}
+                                              style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:r.units.length?'var(--gold)':'var(--muted)',maxWidth:110}}>
+                                              {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                                            </select>
+                                          )}
+                                          <select value={r.category} disabled={qbBusy} onChange={e=>updRow(i,{category:e.target.value})}
+                                            style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--muted)',maxWidth:100}}>
+                                            {['mantenimiento','limpieza','repuestos','servicios','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                          </select>
+                                        </div>
+                                      </div>
+                                      <div style={{fontSize:12,fontWeight:800,color:'var(--urgent)',flexShrink:0}}>−{fmtMoney(r.amount)}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div style={{display:'flex',gap:8,marginTop:12}}>
+                                  <button onClick={()=>!qbBusy&&setQbRows(null)} disabled={qbBusy} style={{flex:1,background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:9,padding:'11px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Cancelar</button>
+                                  <button onClick={doImport} disabled={qbBusy||inc.length===0} style={{flex:2,background:inc.length?'var(--gold)':'var(--border)',color:'#1a1208',border:'none',borderRadius:9,padding:'11px',fontWeight:800,fontSize:13,cursor:'pointer'}}>
+                                    {qbBusy?(qbProgress||'Importando...'):`Importar ${inc.length} gastos`}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </>
                     );
                   })()}
