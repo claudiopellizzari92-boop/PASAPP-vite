@@ -151,6 +151,50 @@ function AuthProvider({ children }) {
     } catch(e) {}
   }, [token]);
 
+  // ── Gastos por unidad ────────────────────────────────────────
+  // expenses === null → el endpoint no está disponible (backend sin actualizar)
+  const [expenses, setExpenses] = useState([]);
+
+  const fetchExpenses = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await fetch(`${API}/expenses`, { headers:{ Authorization:`Bearer ${token}` } });
+      if (r.ok) {
+        const data = await r.json();
+        setExpenses(data.map(e=>({
+          id: e.id,
+          unitId: e.unit_id ?? e.unitId,
+          concept: e.concept,
+          amount: Number(e.amount)||0,
+          category: e.category||'',
+          date: (e.date||'').slice(0,10),
+        })));
+      } else if (r.status===404) { setExpenses(null); }
+    } catch(e) {}
+  }, [token]);
+
+  const addExpense = useCallback(async (exp) => {
+    if (!token) return { ok:false };
+    try {
+      const r = await fetch(`${API}/expenses`, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${token}` },
+        body: JSON.stringify(exp)
+      });
+      return { ok: r.ok };
+    } catch(e) { return { ok:false }; }
+  }, [token]);
+
+  const deleteExpense = useCallback(async (id) => {
+    if (!token) return { ok:false };
+    try {
+      const r = await fetch(`${API}/expenses/${id}`, {
+        method:'DELETE', headers:{ Authorization:`Bearer ${token}` }
+      });
+      return { ok: r.ok || r.status===204 };
+    } catch(e) { return { ok:false }; }
+  }, [token]);
+
   const saveCancellations = useCallback(async (res) => {
     if (!token) return { ok:false, error:'No autenticado' };
     try {
@@ -213,7 +257,7 @@ function AuthProvider({ children }) {
   }, []);
 
   // Fetch on login
-  useEffect(() => { if (token) { fetchTasks(true); fetchMeasurements(true); fetchReservations(); fetchCancellations(); } }, [token]);
+  useEffect(() => { if (token) { fetchTasks(true); fetchMeasurements(true); fetchReservations(); fetchCancellations(); fetchExpenses(); } }, [token]);
 
   // ── Demo data loader (remove after real data exists) ─────────────────────
   const loadDemoData = useCallback(() => {
@@ -266,7 +310,7 @@ function AuthProvider({ children }) {
     return () => { clearTimeout(t); evs.forEach(e => window.removeEventListener(e, reset, true)); };
   }, [user]);
 
-  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations}}, children);
+  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense}}, children);
 }
 
 /* CONSTANTS */
@@ -411,6 +455,32 @@ const showNotif = async (title, opts) => {
     new Notification(title, opts); // fallback escritorio sin SW
   } catch (e) { console.log('No se pudo mostrar la notificación:', e); }
 };
+
+// Comprime una imagen en el cliente antes de subirla (máx 1200px, JPEG 80%).
+// Reduce ~5-10x el peso → ahorra espacio en Cloudinary y memoria en el móvil.
+const compressImage = (file, maxDim=1200, quality=0.8) => new Promise((resolve) => {
+  const rd = new FileReader();
+  rd.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          const s = Math.min(maxDim/w, maxDim/h);
+          w = Math.round(w*s); h = Math.round(h*s);
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL('image/jpeg', quality));
+      } catch { resolve(e.target.result); } // fallback: original
+    };
+    img.onerror = () => resolve(e.target.result);
+    img.src = e.target.result;
+  };
+  rd.onerror = () => resolve(null);
+  rd.readAsDataURL(file);
+});
 
 const CATS = [
   {id:'plomeria',label:'Plomería'},{id:'electricidad',label:'Electricidad'},
@@ -737,11 +807,10 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
               <input className="dm-note-inp" value={note} onChange={e=>setNote(e.target.value)} placeholder="Agregar nota..." onKeyDown={e=>e.key==='Enter'&&addNote()}/>
               <label style={{display:'flex',alignItems:'center',justifyContent:'center',width:34,height:34,cursor:'pointer',color:'var(--muted)',flexShrink:0}}>
                 <span style={{fontSize:16}}>&#128247;</span>
-                <input type="file" accept="image/*" style={{display:'none'}} onChange={e=>{
+                <input type="file" accept="image/*" style={{display:'none'}} onChange={async e=>{
                   const file=e.target.files[0]; if(!file) return;
-                  const rd=new FileReader();
-                  rd.onload=ev=>setNotePhoto(ev.target.result);
-                  rd.readAsDataURL(file);
+                  const data = await compressImage(file);
+                  if (data) setNotePhoto(data);
                 }}/>
               </label>
               <button className="dm-note-btn" onClick={addNote} disabled={(!note.trim()&&!notePhoto)||busy}>
@@ -763,20 +832,18 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
               const uploadPhoto = async file => {
                 if (photoUploading) return;
                 setPhotoUploading(type);
-                const rd = new FileReader();
-                rd.onload = async ev => {
-                  try {
-                    const r = await authFetch(`/tasks/${t.id}/photo?type=${type}`,{method:'POST',body:JSON.stringify({data:ev.target.result})});
+                try {
+                  const data = await compressImage(file);
+                  if (data) {
+                    const r = await authFetch(`/tasks/${t.id}/photo?type=${type}`,{method:'POST',body:JSON.stringify({data})});
                     if (r.ok) {
                       const updated = await r.json();
-                      console.log('Photo upload response:', JSON.stringify({photosStart: updated.photosStart, photosComplete: updated.photosComplete, photoStart: updated.photoStart, photoComplete: updated.photoComplete}));
                       setT(updated);
                     }
-                  } finally {
-                    setPhotoUploading(null);
                   }
-                };
-                rd.readAsDataURL(file);
+                } finally {
+                  setPhotoUploading(null);
+                }
               };
 
               const deletePhoto = async (idx) => {
@@ -3024,7 +3091,7 @@ function DashboardScreen({ onNavigate }) {
 
 /* RESERVATIONS SCREEN */
 function ReservationsScreen() {
-  const { user, reservations, setReservations, saveReservations, cancellations, setCancellations, saveCancellations, tasks:allTasks } = useAuth();
+  const { user, reservations, setReservations, saveReservations, cancellations, setCancellations, saveCancellations, tasks:allTasks, expenses, fetchExpenses, addExpense, deleteExpense } = useAuth();
   const tasks = allTasks || [];
   const now = new Date();
   const isAdmin = user?.username === 'admin';
@@ -3032,6 +3099,10 @@ function ReservationsScreen() {
   const [selYear2, setSelYear2] = useState(null); // comparison year
   const [selMonth, setSelMonth] = useState(null);
   const [selUnit, setSelUnit] = useState('all');
+  const [priceUnit, setPriceUnit] = useState('all'); // unidad para historial de tarifas
+  const [showExpForm, setShowExpForm] = useState(false);
+  const [expBusy, setExpBusy] = useState(false);
+  const [expF, setExpF] = useState({unitId:1,concept:'',amount:'',category:'mantenimiento',date:new Date().toISOString().slice(0,10)});
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -3578,6 +3649,173 @@ function ReservationsScreen() {
                     </div>
                   </div>
                 )}
+
+                {/* ── GASTOS ── */}
+                <div>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                    <div className="dash-section-title" style={{marginBottom:0}}>💸 Gastos — {incMonth!==null?MONTHS[incMonth]+' '+incYear:incYear}</div>
+                    {expenses!==null&&(
+                      <button onClick={()=>setShowExpForm(f=>!f)} style={{background:showExpForm?'var(--border)':'var(--gold)',color:showExpForm?'var(--muted)':'#1a1208',border:'none',borderRadius:8,padding:'6px 12px',fontSize:11,fontWeight:800,cursor:'pointer'}}>
+                        {showExpForm?'Cancelar':'+ Gasto'}
+                      </button>
+                    )}
+                  </div>
+
+                  {expenses===null?(
+                    <div style={{background:'rgba(201,150,58,.06)',border:'1px dashed rgba(201,150,58,.3)',borderRadius:10,padding:'12px 14px',fontSize:11,color:'var(--muted)',lineHeight:1.5}}>
+                      ⚙️ El registro de gastos requiere actualizar el backend (tabla <code>expenses</code> + endpoints). Seguí las instrucciones que acompañan esta versión.
+                    </div>
+                  ):(()=>{
+                    // Filtrar gastos por período seleccionado
+                    const filtExp = expenses.filter(e=>{
+                      if (!e.date) return false;
+                      const [y,m] = e.date.split('-').map(Number);
+                      if (y!==incYear) return false;
+                      if (incMonth!==null && (m-1)!==incMonth) return false;
+                      return true;
+                    }).sort((a,b)=>b.date.localeCompare(a.date));
+                    const totalExp = filtExp.reduce((s,e)=>s+e.amount,0);
+                    const neto = totalIncome - totalExp;
+
+                    const saveExp = async () => {
+                      if (!expF.concept.trim() || !expF.amount) return;
+                      setExpBusy(true);
+                      const r = await addExpense({
+                        unitId: Number(expF.unitId),
+                        concept: expF.concept.trim(),
+                        amount: Number(expF.amount),
+                        category: expF.category,
+                        date: expF.date,
+                      });
+                      if (r.ok) {
+                        await fetchExpenses();
+                        setExpF(p=>({...p,concept:'',amount:''}));
+                        setShowExpForm(false);
+                      } else {
+                        alert('No se pudo guardar el gasto. ¿El backend está actualizado?');
+                      }
+                      setExpBusy(false);
+                    };
+
+                    const delExp = async (id) => {
+                      if (!confirm('¿Borrar este gasto?')) return;
+                      const r = await deleteExpense(id);
+                      if (r.ok) fetchExpenses();
+                    };
+
+                    return (
+                      <>
+                        {showExpForm&&(
+                          <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',marginBottom:10,display:'flex',flexDirection:'column',gap:8}}>
+                            <div style={{display:'flex',gap:8}}>
+                              <select className="minp msel" style={{flex:1}} value={expF.unitId} onChange={e=>setExpF(p=>({...p,unitId:e.target.value}))}>
+                                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                              </select>
+                              <select className="minp msel" style={{flex:1}} value={expF.category} onChange={e=>setExpF(p=>({...p,category:e.target.value}))}>
+                                {['mantenimiento','limpieza','repuestos','servicios','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                              </select>
+                            </div>
+                            <input className="minp" value={expF.concept} onChange={e=>setExpF(p=>({...p,concept:e.target.value}))} placeholder="Concepto (ej: repuesto A/C, plomero...)"/>
+                            <div style={{display:'flex',gap:8}}>
+                              <input className="minp" style={{flex:1}} type="number" inputMode="decimal" value={expF.amount} onChange={e=>setExpF(p=>({...p,amount:e.target.value}))} placeholder="Monto $"/>
+                              <input className="minp" style={{flex:1}} type="date" value={expF.date} onChange={e=>setExpF(p=>({...p,date:e.target.value}))}/>
+                            </div>
+                            <button onClick={saveExp} disabled={expBusy||!expF.concept.trim()||!expF.amount} style={{background:expF.concept.trim()&&expF.amount?'var(--gold)':'var(--border)',color:'#1a1208',border:'none',borderRadius:9,padding:'10px',fontSize:13,fontWeight:800,cursor:'pointer'}}>
+                              {expBusy?'Guardando...':'Guardar gasto'}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Resumen ingresos - gastos = neto */}
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:10}}>
+                          {[
+                            {l:'Ingresos', v:fmtMoney(totalIncome), c:'var(--done)'},
+                            {l:'Gastos',   v:'−'+fmtMoney(totalExp), c:'var(--urgent)'},
+                            {l:'Neto',     v:fmtMoney(neto), c: neto>=0?'var(--gold)':'var(--urgent)'},
+                          ].map((k,i)=>(
+                            <div key={i} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
+                              <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:k.c}}>{k.v}</div>
+                              <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>{k.l}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {filtExp.length===0?(
+                          <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'8px 0'}}>Sin gastos registrados en este período</div>
+                        ):(
+                          <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                            {filtExp.map(e=>(
+                              <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 12px'}}>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{uname(e.unitId)} · {e.concept}</div>
+                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category}</div>
+                                </div>
+                                <div style={{fontSize:13,fontWeight:800,color:'var(--urgent)',flexShrink:0}}>−{fmtMoney(e.amount)}</div>
+                                <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* ── HISTORIAL DE TARIFAS ── */}
+                <div>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                    <div className="dash-section-title" style={{marginBottom:0}}>💲 Tarifa promedio/noche — {incYear}</div>
+                    <select value={priceUnit} onChange={e=>setPriceUnit(e.target.value)}
+                      style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:7,padding:'4px 8px',fontSize:11,color:'var(--muted)',outline:'none'}}>
+                      <option value="all">Todas</option>
+                      {rentableUnits.map(uid=><option key={uid} value={uid}>{uname(uid)}</option>)}
+                    </select>
+                  </div>
+                  {(()=>{
+                    const nightlyByMonth = MONTHS.map((lbl,i)=>{
+                      const mRes = reservations.filter(r=>
+                        r.checkOut.getFullYear()===incYear && r.checkOut.getMonth()===i &&
+                        (priceUnit==='all'||r.unitId===parseInt(priceUnit))
+                      );
+                      const nights = mRes.reduce((s,r)=>s+Math.max(1,Math.round((r.checkOut-r.checkIn)/(1000*60*60*24))),0);
+                      const inc = mRes.reduce((s,r)=>s+parseIncome(r.income),0);
+                      return { lbl, avg: nights>0 ? inc/nights : null, nights };
+                    });
+                    const withData = nightlyByMonth.filter(m=>m.avg!==null);
+                    if (withData.length===0) return <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'8px 0'}}>Sin datos de tarifas para este período</div>;
+                    const maxAvg = Math.max(...withData.map(m=>m.avg));
+                    const yearAvg = withData.reduce((s,m)=>s+m.avg*m.nights,0)/withData.reduce((s,m)=>s+m.nights,0);
+                    return (
+                      <>
+                        <div style={{display:'flex',gap:3,alignItems:'flex-end',height:100,padding:'0 2px'}}>
+                          {nightlyByMonth.map((m,i)=>{
+                            const isCurrent = i===now.getMonth()&&incYear===now.getFullYear();
+                            const barH = m.avg!==null?Math.round(m.avg/maxAvg*100):0;
+                            return (
+                              <div key={i} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:2}}>
+                                <div style={{fontSize:6,color:m.avg!==null?'var(--gold)':'transparent',fontWeight:700,lineHeight:1,whiteSpace:'nowrap'}}>
+                                  {m.avg!==null?'$'+Math.round(m.avg):''}
+                                </div>
+                                <div style={{width:'100%',height:70,display:'flex',alignItems:'flex-end'}}>
+                                  <div style={{
+                                    width:'100%',height:barH+'%',minHeight:m.avg!==null?3:0,
+                                    background:isCurrent?'var(--gold)':m.avg!==null?'rgba(45,110,78,.6)':'var(--border)',
+                                    borderRadius:'3px 3px 0 0',
+                                  }}/>
+                                </div>
+                                <div style={{fontSize:7,color:isCurrent?'var(--gold)':'var(--muted)',fontWeight:isCurrent?800:400}}>{m.lbl}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{fontSize:10,color:'var(--muted)',textAlign:'center',marginTop:6}}>
+                          Promedio del año: <strong style={{color:'var(--gold)'}}>{'$'+Math.round(yearAvg)}/noche</strong>
+                          {priceUnit!=='all'&&' · '+uname(parseInt(priceUnit))}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
 
               </>
             );
