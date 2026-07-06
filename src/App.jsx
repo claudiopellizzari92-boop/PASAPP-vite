@@ -453,16 +453,61 @@ const parseQBFields = (l) => {
 
 const guessExpCategory = (nota) => {
   if (/limpieza|lavander[íi]a\b/i.test(nota)) return 'limpieza';
-  if (/gas\b|luz|agua|el[ée]ctric|internet|wifi|cable|servicio de/i.test(nota)) return 'servicios';
+  if (/condominio|gas\b|luz|agua|el[ée]ctric|internet|wifi|cable|servicio de/i.test(nota)) return 'servicios';
   if (/suministro|reemplazo|repuesto|compra|lavadora|secadora|nevera|a\.?\s?c\.?|aire|equipo/i.test(nota)) return 'repuestos';
   if (/reparaci|mantenimiento|plagas|revisi|instalaci/i.test(nota)) return 'mantenimiento';
   return 'otro';
 };
 
 const QB_UNIT_IDS = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20];
+const qbDetectUnits = (txt) => {
+  const found = new Set();
+  let m;
+  const res = [
+    /(?:casa|apto|apt\.?|unidad)\s*(?:n\s*[°º*]?\s*)?0?(\d{1,2})\b/gi,
+    /n\s*[°º]\s*0?(\d{1,2})\b/gi,
+    /pas\s*0?(\d{1,2})\b/gi,
+    /unit\s*0?(\d{1,2})\b/gi,
+  ];
+  for (const re of res) {
+    while ((m = re.exec(txt))) { const n=parseInt(m[1]); if(QB_UNIT_IDS.includes(n)) found.add(n); }
+  }
+  return [...found];
+};
+
+// Soporta dos reportes de QuickBooks:
+// 1. "Lista de compras" (recomendado): tabular, sin doble conteo
+// 2. "Lista de transacciones por proveedor": agrupado, se excluyen los pagos
 const parseQuickBooksCSV = (csvText) => {
   const lines = csvText.split('\n');
   const rows = [];
+
+  // ¿Formato "Lista de compras"?
+  const comprasIdx = lines.findIndex(l=>l.includes('Identificación de la transacción'));
+  if (comprasIdx >= 0) {
+    for (let i=comprasIdx+1; i<lines.length; i++) {
+      const f = parseQBFields(lines[i]);
+      const dateM = (f[2]||'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if (!dateM) continue;
+      const amt = parseFloat((f[5]||'').replace(/[^0-9.\-]/g,''));
+      if (isNaN(amt) || amt===0) continue;
+      const vendor = f[1]||'', numero = f[3]||'', desc = f[4]||'';
+      const units = qbDetectUnits(numero + ' ' + desc);
+      rows.push({
+        date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
+        vendor, tipo: amt<0?'Nota de crédito':'Compra',
+        concept: desc || numero || `(${vendor})`,
+        amount: amt, // con signo: las notas de crédito restan
+        units,
+        unit: units[0] || 101,
+        category: guessExpCategory(desc),
+        include: true,
+      });
+    }
+    return rows;
+  }
+
+  // Formato "Lista de transacciones por proveedor"
   let vendor = '';
   let headerFound = false;
   for (const line of lines) {
@@ -472,7 +517,6 @@ const parseQuickBooksCSV = (csvText) => {
     }
     const f = parseQBFields(line);
     if (f[0]) {
-      // fila de proveedor o de total
       if (!f[0].startsWith('Total para')) vendor = f[0];
       continue;
     }
@@ -482,24 +526,16 @@ const parseQuickBooksCSV = (csvText) => {
     const nota = f[5]||'';
     const amt = parseFloat((f[7]||'').replace(/[^0-9.\-]/g,''));
     if (isNaN(amt) || amt===0) continue;
-    // Detectar unidades mencionadas: "Casa N° 17", "Apto 01", "N°4"...
-    const found = new Set();
-    let m;
-    const re1 = /(?:casa|apto|apt\.?|unidad|pas)\s*(?:n\s*[°º*]?\s*)?0?(\d{1,2})/gi;
-    const re2 = /n\s*[°º]\s*0?(\d{1,2})/gi;
-    while ((m = re1.exec(nota))) { const n=parseInt(m[1]); if(QB_UNIT_IDS.includes(n)) found.add(n); }
-    while ((m = re2.exec(nota))) { const n=parseInt(m[1]); if(QB_UNIT_IDS.includes(n)) found.add(n); }
-    // "Factura de proveedor" y "Gasto" = gasto real (incluir).
-    // "Pago de facturas..." = pago de una factura ya contada (excluir para no duplicar).
+    const units = qbDetectUnits(nota);
+    // "Factura de proveedor" y "Gasto" = gasto real. "Pago de facturas..." se excluye (duplicaría).
     const esGasto = /factura de proveedor/i.test(tipo) || /^gasto$/i.test(tipo);
-    const units = [...found];
     rows.push({
       date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
       vendor, tipo,
       concept: nota || `(${vendor})`,
       amount: Math.abs(amt),
       units,
-      unit: units[0] || 101, // por defecto Áreas Comunes si no se detectó
+      unit: units[0] || 101,
       category: guessExpCategory(nota),
       include: esGasto,
     });
@@ -3842,7 +3878,7 @@ function ReservationsScreen() {
                                   <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{uname(e.unitId)} · {e.concept}</div>
                                   <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category}</div>
                                 </div>
-                                <div style={{fontSize:13,fontWeight:800,color:'var(--urgent)',flexShrink:0}}>−{fmtMoney(e.amount)}</div>
+                                <div style={{fontSize:13,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
                                 <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
                               </div>
                             ))}
@@ -3935,7 +3971,7 @@ function ReservationsScreen() {
                                           </select>
                                         </div>
                                       </div>
-                                      <div style={{fontSize:12,fontWeight:800,color:'var(--urgent)',flexShrink:0}}>−{fmtMoney(r.amount)}</div>
+                                      <div style={{fontSize:12,fontWeight:800,color:r.amount<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{r.amount<0?'+'+fmtMoney(-r.amount):'−'+fmtMoney(r.amount)}</div>
                                     </div>
                                   ))}
                                 </div>
