@@ -3210,6 +3210,7 @@ function ReservationsScreen() {
   const [qbRows, setQbRows] = useState(null);      // filas parseadas del CSV de QuickBooks
   const [qbBusy, setQbBusy] = useState(false);
   const [qbProgress, setQbProgress] = useState('');
+  const [qbRate, setQbRate] = useState('1.78');    // tasa AWG → USD
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -3771,10 +3772,10 @@ function ReservationsScreen() {
                             rd.onload=ev=>{
                               const parsed = parseQuickBooksCSV(ev.target.result);
                               if (parsed.length===0) { alert('No se encontraron transacciones. ¿Es el reporte "Lista de transacciones por proveedor" de QuickBooks?'); return; }
-                              // Marcar duplicados contra gastos ya registrados
-                              const existing = new Set((expenses||[]).map(x=>`${x.date}|${x.amount.toFixed(2)}|${x.concept}`));
+                              // Marcar duplicados contra gastos ya registrados (comparando en USD, tasa 1.78)
+                              const existing = new Set((expenses||[]).map(x=>`${x.date}|${x.amount.toFixed(2)}`));
                               parsed.forEach(r=>{
-                                if (existing.has(`${r.date}|${r.amount.toFixed(2)}|${r.concept}`)) { r.dup=true; r.include=false; }
+                                if (existing.has(`${r.date}|${(r.amount/1.78).toFixed(2)}`)) { r.dup=true; r.include=false; }
                               });
                               setQbRows(parsed);
                             };
@@ -3887,22 +3888,24 @@ function ReservationsScreen() {
 
                         {/* ── Vista previa de importación QuickBooks ── */}
                         {qbRows&&(()=>{
+                          const rate = parseFloat(qbRate) || 1.78;
+                          const conv = (a) => a / rate; // AWG → USD
                           const inc = qbRows.filter(r=>r.include);
-                          const totalInc = inc.reduce((s,r)=>s+r.amount,0);
+                          const totalInc = conv(inc.reduce((s,r)=>s+r.amount,0));
                           const toggleAll = (v) => setQbRows(rows=>rows.map(r=>r.dup?r:{...r,include:v}));
                           const updRow = (i,patch) => setQbRows(rows=>rows.map((r,j)=>j===i?{...r,...patch}:r));
 
                           const doImport = async () => {
                             setQbBusy(true);
-                            // Expandir multi-unidad: dividir el monto entre las unidades
+                            // Expandir multi-unidad y convertir AWG → USD
                             const finalList = [];
                             inc.forEach(r=>{
                               const us = r.units.length>1 ? r.units : [r.unit];
-                              const amt = r.units.length>1 ? r.amount/r.units.length : r.amount;
+                              const amtUsd = conv(r.units.length>1 ? r.amount/r.units.length : r.amount);
                               us.forEach(u=>finalList.push({
                                 unitId: u,
                                 concept: r.concept.slice(0,200) + (r.units.length>1?` (dividido /${r.units.length})`:''),
-                                amount: Math.round(amt*100)/100,
+                                amount: Math.round(amtUsd*100)/100,
                                 category: r.category,
                                 date: r.date,
                               }));
@@ -3936,10 +3939,16 @@ function ReservationsScreen() {
                             <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&!qbBusy&&setQbRows(null)}>
                               <div style={{background:'var(--surface)',borderRadius:14,padding:'16px',maxWidth:420,width:'94%',maxHeight:'85vh',display:'flex',flexDirection:'column'}}>
                                 <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:4}}>Importar de QuickBooks</div>
-                                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10,lineHeight:1.4}}>
-                                  {qbRows.length} transacciones · <strong style={{color:'var(--gold)'}}>{inc.length} seleccionadas</strong> ({fmtMoney(totalInc)}).
+                                <div style={{fontSize:11,color:'var(--muted)',marginBottom:8,lineHeight:1.4}}>
+                                  {qbRows.length} transacciones · <strong style={{color:'var(--gold)'}}>{inc.length} seleccionadas</strong> ({fmtMoney(totalInc)} USD).
                                   Los pagos de facturas se excluyen para no contar doble.
                                   {qbRows.some(r=>r.dup)&&' Los ya registrados aparecen marcados.'}
+                                </div>
+                                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,background:'rgba(201,150,58,.07)',border:'1px solid rgba(201,150,58,.2)',borderRadius:9,padding:'7px 10px'}}>
+                                  <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Conversión: <strong style={{color:'var(--text)'}}>ƒ (AWG) → $ (USD)</strong></span>
+                                  <span style={{fontSize:10,color:'var(--muted)'}}>Tasa</span>
+                                  <input type="number" step="0.01" value={qbRate} disabled={qbBusy} onChange={e=>setQbRate(e.target.value)}
+                                    style={{width:58,fontSize:12,fontWeight:700,padding:'4px 6px',borderRadius:7,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--gold)',textAlign:'center'}}/>
                                 </div>
                                 <div style={{display:'flex',gap:6,marginBottom:8}}>
                                   <button onClick={()=>toggleAll(true)} style={{flex:1,fontSize:10,fontWeight:700,padding:'5px',borderRadius:7,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Marcar todos</button>
@@ -3971,7 +3980,10 @@ function ReservationsScreen() {
                                           </select>
                                         </div>
                                       </div>
-                                      <div style={{fontSize:12,fontWeight:800,color:r.amount<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{r.amount<0?'+'+fmtMoney(-r.amount):'−'+fmtMoney(r.amount)}</div>
+                                      <div style={{flexShrink:0,textAlign:'right'}}>
+                                        <div style={{fontSize:12,fontWeight:800,color:r.amount<0?'var(--done)':'var(--urgent)'}}>{r.amount<0?'+'+fmtMoney(conv(-r.amount)):'−'+fmtMoney(conv(r.amount))}</div>
+                                        <div style={{fontSize:8,color:'var(--muted)',marginTop:1}}>ƒ{Math.abs(r.amount).toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+                                      </div>
                                     </div>
                                   ))}
                                 </div>
