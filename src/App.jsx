@@ -257,6 +257,8 @@ function AuthProvider({ children }) {
 
   useEffect(() => {
     if (!user) return;
+    // Si el usuario marcó "Mantener sesión abierta", no hay auto-logout por inactividad
+    if (localStorage.getItem('ps_keep') === '1') return;
     let t = setTimeout(logout, 30*60*1000);
     const reset = () => { clearTimeout(t); t = setTimeout(logout, 30*60*1000); };
     const evs = ['mousedown','mousemove','keydown','touchstart','scroll','click'];
@@ -463,9 +465,16 @@ function LoginScreen() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [biobusy, setBioBusy] = useState(false);
+  const [keep, setKeep] = useState(() => localStorage.getItem('ps_keep') === '1');
+
+  const saveKeep = () => {
+    if (keep) localStorage.setItem('ps_keep','1');
+    else localStorage.removeItem('ps_keep');
+  };
 
   const submit = async e => {
     e.preventDefault(); setErr(''); setBusy(true);
+    saveKeep();
     try { await login(u, p); }
     catch(e2) { setErr(e2.message); }
     finally { setBusy(false); }
@@ -473,6 +482,7 @@ function LoginScreen() {
 
   const doBio = async () => {
     setErr(''); setBioBusy(true);
+    saveKeep();
     try { await loginBiometric(); }
     catch(e2) { setErr(e2.message||'Error con la huella'); }
     finally { setBioBusy(false); }
@@ -510,6 +520,11 @@ function LoginScreen() {
             <label>Contraseña</label>
             <input type="password" value={p} onChange={e=>setP(e.target.value)} placeholder="••••••••" autoComplete="current-password"/>
           </div>
+          <label style={{display:'flex',alignItems:'center',gap:8,margin:'2px 0 14px',cursor:'pointer',userSelect:'none'}}>
+            <input type="checkbox" checked={keep} onChange={e=>setKeep(e.target.checked)}
+              style={{width:16,height:16,accentColor:'#c9963a',cursor:'pointer',flexShrink:0}}/>
+            <span style={{fontSize:12,color:'rgba(255,255,255,.55)'}}>Mantener sesión abierta</span>
+          </label>
           <button type="submit" className="login-btn" disabled={busy||!u||!p}>
             {busy?'Verificando...':'Ingresar →'}
           </button>
