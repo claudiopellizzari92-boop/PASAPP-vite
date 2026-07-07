@@ -459,6 +459,12 @@ const guessExpCategory = (nota) => {
   return 'otro';
 };
 
+// Asientos contables que NO son gasto operativo real → se ignoran al importar.
+// - Depreciación / amortización de activos (asiento sin salida de caja)
+// - Amortización de capital de préstamos (reduce deuda, no es gasto)
+const isNonOperating = (nota) =>
+  /depreciaci[óo]n|amortizaci[óo]n\s+de\s+(capital|activo)|amortizaci[óo]n\s+del?\s+pr[ée]stamo/i.test(nota||'');
+
 const QB_UNIT_IDS = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20];
 const qbDetectUnits = (txt) => {
   const found = new Set();
@@ -492,6 +498,7 @@ const parseQuickBooksCSV = (csvText) => {
       const amt = parseFloat((f[5]||'').replace(/[^0-9.\-]/g,''));
       if (isNaN(amt) || amt===0) continue;
       const vendor = f[1]||'', numero = f[3]||'', desc = f[4]||'';
+      if (isNonOperating(desc)) continue; // ignorar depreciaciones/amortizaciones
       const units = qbDetectUnits(numero + ' ' + desc);
       rows.push({
         date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
@@ -526,6 +533,7 @@ const parseQuickBooksCSV = (csvText) => {
     const nota = f[5]||'';
     const amt = parseFloat((f[7]||'').replace(/[^0-9.\-]/g,''));
     if (isNaN(amt) || amt===0) continue;
+    if (isNonOperating(nota)) continue; // ignorar depreciaciones/amortizaciones
     const units = qbDetectUnits(nota);
     // "Factura de proveedor" y "Gasto" = gasto real. "Pago de facturas..." se excluye (duplicaría).
     const esGasto = /factura de proveedor/i.test(tipo) || /^gasto$/i.test(tipo);
