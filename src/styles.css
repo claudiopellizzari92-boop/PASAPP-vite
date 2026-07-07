@@ -349,3 +349,16 @@
       .app, .login{max-width:880px}
       .fab{right:calc(50% - 426px)}
     }
+
+    /* ═══ ETAPA 2: dos columnas en escritorio ═══
+       En móvil los wrappers no existen visualmente (display:contents),
+       así el layout original queda intacto. */
+    .dash-cols,.dash-col,.ing-grid,.ing-left,.ing-right{display:contents}
+
+    @media (min-width: 900px) {
+      .dash-cols{display:grid;grid-template-columns:1.05fr .95fr;gap:16px;align-items:start}
+      .dash-col{display:flex;flex-direction:column;gap:14px;min-width:0}
+
+      .ing-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+      .ing-left,.ing-right{display:flex;flex-direction:column;gap:16px;min-width:0}
+    }
