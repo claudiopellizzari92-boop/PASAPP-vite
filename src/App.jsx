@@ -4108,11 +4108,11 @@ function ReservationsScreen() {
                                             list.forEach(e=>{ const n=nameOf(e); if(!groups[n])groups[n]=[]; groups[n].push(e); });
                                             const gkeys = Object.keys(groups).sort((a,b)=>
                                               Math.abs(groups[b].reduce((s,e)=>s+e.amount,0))-Math.abs(groups[a].reduce((s,e)=>s+e.amount,0)));
-                                            const itemRow = (e, indent) => (
+                                            const itemRow = (e, indent, showName) => (
                                               <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,padding:`6px 14px 6px ${indent}px`,borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
                                                 <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})} title="Tocar para editar">
-                                                  <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{descOf(e)||nameOf(e)}</div>
-                                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category} · ✎</div>
+                                                  <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showName?nameOf(e):(descOf(e)||e.date)}</div>
+                                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showName&&descOf(e)?descOf(e)+' · ':''}{e.date} · {e.category} · ✎</div>
                                                 </div>
                                                 <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
                                                 <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
@@ -4120,7 +4120,7 @@ function ReservationsScreen() {
                                             );
                                             return gkeys.map(gn=>{
                                               const items = groups[gn].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-                                              if (items.length===1) return itemRow({...items[0], concept: items[0].concept}, 40);
+                                              if (items.length===1) return itemRow(items[0], 40, true);
                                               const gTotal = items.reduce((s,e)=>s+e.amount,0);
                                               const gkey = `${ukey}_${gn}`;
                                               const gOpen = expOpenName[gkey];
@@ -4133,7 +4133,7 @@ function ReservationsScreen() {
                                                     <span style={{fontSize:9,color:'var(--muted)',flexShrink:0}}>×{items.length}</span>
                                                     <span style={{fontSize:12,fontWeight:800,color:gTotal<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{gTotal<0?'+'+fmtMoney(-gTotal):'−'+fmtMoney(gTotal)}</span>
                                                   </button>
-                                                  {gOpen&&items.map(e=>itemRow(e,52))}
+                                                  {gOpen&&items.map(e=>itemRow(e,52,false))}
                                                 </div>
                                               );
                                             });
