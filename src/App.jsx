@@ -493,12 +493,55 @@ const qbDetectUnits = (txt) => {
   return [...found];
 };
 
-// Soporta dos reportes de QuickBooks:
-// 1. "Lista de compras" (recomendado): tabular, sin doble conteo
-// 2. "Lista de transacciones por proveedor": agrupado, se excluyen los pagos
+// Une líneas partidas por saltos de línea dentro de comillas (descripciones largas)
+const joinQuotedLines = (csvText) => {
+  const raw = csvText.split('\n');
+  const out = [];
+  let buf = '';
+  for (const l of raw) {
+    buf = buf ? buf + ' ' + l : l;
+    const quotes = (buf.match(/"/g)||[]).length;
+    if (quotes % 2 === 0) { out.push(buf); buf = ''; }
+  }
+  if (buf) out.push(buf);
+  return out;
+};
+
+// Soporta tres reportes de QuickBooks:
+// 1. "Informe detallado de cheques" (RECOMENDADO): base caja — lo realmente pagado cada mes
+// 2. "Lista de compras": base devengado — lo facturado cada mes
+// 3. "Lista de transacciones por proveedor": agrupado, se excluyen los pagos
 const parseQuickBooksCSV = (csvText) => {
-  const lines = csvText.split('\n');
+  const lines = joinQuotedLines(csvText);
   const rows = [];
+
+  // ¿Formato "Informe detallado de cheques"? (base caja)
+  const chequesIdx = lines.findIndex(l=>l.includes('Fecha de la transacción') && l.includes('Compensado'));
+  if (chequesIdx >= 0) {
+    for (let i=chequesIdx+1; i<lines.length; i++) {
+      const f = parseQBFields(lines[i]);
+      const dateM = (f[1]||'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if (!dateM) continue; // filas de cuenta bancaria o totales
+      const amt = parseFloat((f[7]||'').replace(/[^0-9.\-]/g,''));
+      if (isNaN(amt) || amt===0) continue;
+      const vendor = f[4]||'', desc = f[5]||'';
+      if (isNonOperating(desc)) continue;
+      const units = qbDetectUnits(desc);
+      rows.push({
+        date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
+        vendor, tipo: 'Pago',
+        concept: desc || `(${vendor})`,
+        // Salidas del banco vienen en negativo → gasto positivo.
+        // Entradas (reembolsos) vienen en positivo → crédito (resta).
+        amount: -amt,
+        units,
+        unit: units[0] || 101,
+        category: guessExpCategory(desc),
+        include: true,
+      });
+    }
+    return rows;
+  }
 
   // ¿Formato "Lista de compras"?
   const comprasIdx = lines.findIndex(l=>l.includes('Identificación de la transacción'));
@@ -523,8 +566,23 @@ const parseQuickBooksCSV = (csvText) => {
         unit: units[0] || 101,
         category: guessExpCategory(desc),
         include: true,
+        _doc: `${vendor}|${dateM[0]}|${numero}`, // clave de documento para detectar multi-línea
       });
     }
+    // Documentos con varias líneas: QuickBooks pierde el signo de las líneas que restan
+    // (ej: compra con financiamiento/trade-in) → los montos pueden estar inflados. Marcar.
+    const docCount = {};
+    rows.forEach(r=>{ if(r._doc) docCount[r._doc]=(docCount[r._doc]||0)+1; });
+    rows.forEach(r=>{ if(r._doc && docCount[r._doc]>1 && r.tipo!=='Préstamo') r.multiLine = true; });
+    // Líneas espejo: mismo documento con el MISMO monto repetido (debe/haber de asientos,
+    // típico en impuestos sobre ingresos). La segunda copia se excluye automáticamente.
+    const seenLine = {};
+    rows.forEach(r=>{
+      if (!r._doc) return;
+      const k = `${r._doc}|${Math.abs(r.amount).toFixed(2)}`;
+      if (seenLine[k]) { r.mirror = true; r.include = false; }
+      else seenLine[k] = true;
+    });
     return rows;
   }
 
@@ -4197,6 +4255,15 @@ function ReservationsScreen() {
                                         <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>
                                           {r.date} · {r.vendor.slice(0,26)}{r.dup?' · YA REGISTRADO':''}
                                         </div>
+                                        {r.mirror?(
+                                          <div style={{fontSize:9,fontWeight:700,color:'var(--muted)',background:'rgba(0,0,0,.05)',border:'1px solid var(--border)',borderRadius:6,padding:'2px 7px',marginTop:3,display:'inline-block'}}>
+                                            ⊘ Línea espejo (debe/haber) — excluida automáticamente
+                                          </div>
+                                        ):r.multiLine?(
+                                          <div style={{fontSize:9,fontWeight:700,color:'var(--urgent)',background:'rgba(184,50,50,.08)',border:'1px solid rgba(184,50,50,.2)',borderRadius:6,padding:'2px 7px',marginTop:3,display:'inline-block'}}>
+                                            ⚠ Documento con varias líneas — verificá el monto contra el pago real
+                                          </div>
+                                        ):null}
                                         <div style={{display:'flex',gap:5,marginTop:4,alignItems:'center'}}>
                                           {r.units.length>1?(
                                             <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'2px 7px',borderRadius:6}}>
