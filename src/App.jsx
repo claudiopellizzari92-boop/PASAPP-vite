@@ -207,6 +207,19 @@ function AuthProvider({ children }) {
     } catch(e) { return { ok:false }; }
   }, [token]);
 
+  // Borrado masivo por rango de fechas (una sola petición)
+  const deleteExpensesRange = useCallback(async (from, to) => {
+    if (!token) return { ok:false };
+    try {
+      const r = await fetch(`${API}/expenses/delete-range`, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${token}` },
+        body: JSON.stringify({ from, to })
+      });
+      return { ok: r.ok };
+    } catch(e) { return { ok:false }; }
+  }, [token]);
+
   const saveCancellations = useCallback(async (res) => {
     if (!token) return { ok:false, error:'No autenticado' };
     try {
@@ -322,7 +335,7 @@ function AuthProvider({ children }) {
     return () => { clearTimeout(t); evs.forEach(e => window.removeEventListener(e, reset, true)); };
   }, [user]);
 
-  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense,updateExpense}}, children);
+  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense,updateExpense,deleteExpensesRange}}, children);
 }
 
 /* CONSTANTS */
@@ -3312,7 +3325,7 @@ function DashboardScreen({ onNavigate }) {
 
 /* RESERVATIONS SCREEN */
 function ReservationsScreen() {
-  const { user, reservations, setReservations, saveReservations, cancellations, setCancellations, saveCancellations, tasks:allTasks, expenses, fetchExpenses, addExpense, deleteExpense, updateExpense } = useAuth();
+  const { user, reservations, setReservations, saveReservations, cancellations, setCancellations, saveCancellations, tasks:allTasks, expenses, fetchExpenses, addExpense, deleteExpense, updateExpense, deleteExpensesRange } = useAuth();
   const tasks = allTasks || [];
   const now = new Date();
   const isAdmin = user?.username === 'admin';
@@ -3983,10 +3996,17 @@ function ReservationsScreen() {
                     const delPeriod = async () => {
                       if (filtExp.length===0) return;
                       if (!confirm(`Vas a BORRAR los ${filtExp.length} gastos de ${periodLabel}.\n\nUsalo antes de reimportar ese período desde QuickBooks para evitar duplicados.\n\n¿Continuar?`)) return;
-                      let done = 0;
-                      for (const e of filtExp) {
-                        setExpDelBusy(`Borrando ${++done} de ${filtExp.length}...`);
-                        await deleteExpense(e.id);
+                      setExpDelBusy('Borrando período...');
+                      const from = incMonth!==null ? `${incYear}-${String(incMonth+1).padStart(2,'0')}-01` : `${incYear}-01-01`;
+                      const to   = incMonth!==null ? `${incYear}-${String(incMonth+1).padStart(2,'0')}-31` : `${incYear}-12-31`;
+                      const r = await deleteExpensesRange(from, to);
+                      if (!r.ok) {
+                        // Backend sin el endpoint nuevo → borrar de a uno (lento)
+                        let done = 0;
+                        for (const e of filtExp) {
+                          setExpDelBusy(`Borrando ${++done} de ${filtExp.length}...`);
+                          await deleteExpense(e.id);
+                        }
                       }
                       await fetchExpenses();
                       setExpDelBusy('');
@@ -4220,11 +4240,16 @@ function ReservationsScreen() {
                             if (qbReplace && finalList.length>0) {
                               const dates = finalList.map(x=>x.date).sort();
                               const dMin = dates[0], dMax = dates[dates.length-1];
-                              const toDelete = (expenses||[]).filter(x=>x.date>=dMin && x.date<=dMax);
-                              let del = 0;
-                              for (const x of toDelete) {
-                                setQbProgress(`Limpiando período: ${++del} de ${toDelete.length}...`);
-                                await deleteExpense(x.id);
+                              setQbProgress('Limpiando período...');
+                              const rr = await deleteExpensesRange(dMin, dMax);
+                              if (!rr.ok) {
+                                // Backend sin el endpoint nuevo → borrar de a uno (lento)
+                                const toDelete = (expenses||[]).filter(x=>x.date>=dMin && x.date<=dMax);
+                                let del = 0;
+                                for (const x of toDelete) {
+                                  setQbProgress(`Limpiando período: ${++del} de ${toDelete.length}...`);
+                                  await deleteExpense(x.id);
+                                }
                               }
                             }
                             // Intentar carga masiva; si el backend no la tiene, ir de a uno
