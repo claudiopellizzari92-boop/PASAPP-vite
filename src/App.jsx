@@ -532,7 +532,8 @@ const parseQuickBooksCSV = (csvText) => {
       rows.push({
         date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
         vendor, tipo: 'Pago',
-        concept: desc || `(${vendor})`,
+        // Nombre del proveedor primero, detalle después (separados por ' · ')
+        concept: [vendor, desc].filter(Boolean).join(' · ') || 'Pago',
         // Salidas del banco vienen en negativo → gasto positivo.
         // Entradas (reembolsos) vienen en positivo → crédito (resta).
         amount: -amt,
@@ -3330,6 +3331,7 @@ function ReservationsScreen() {
   const [qbReplace, setQbReplace] = useState(true); // reemplazar período al importar (evita duplicados)
   const [expOpenMonth, setExpOpenMonth] = useState({}); // {'2026-01': true}
   const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
+  const [expOpenName, setExpOpenName] = useState({});   // {'2026-01_8_Kooyman': true}
   const [expDelBusy, setExpDelBusy] = useState('');     // texto de progreso al borrar período
   const [qbCompare, setQbCompare] = useState(null);     // {facturado, cobrado} del reporte por fecha
   const [editExp, setEditExp] = useState(null);          // gasto en edición
@@ -4098,17 +4100,44 @@ function ReservationsScreen() {
                                             <span style={{fontSize:9,color:'var(--muted)'}}>{list.length}</span>
                                             <span style={{fontSize:12,fontWeight:800,color:uTotal<0?'var(--done)':'var(--text)'}}>{uTotal<0?'+'+fmtMoney(-uTotal):'−'+fmtMoney(uTotal)}</span>
                                           </button>
-                                          {/* Gastos de la unidad */}
-                                          {uOpen&&list.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>(
-                                            <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 14px 7px 40px',borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
-                                              <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})} title="Tocar para editar">
-                                                <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.concept}</div>
-                                                <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category} · ✎</div>
+                                          {/* Gastos de la unidad, agrupados por nombre (proveedor) */}
+                                          {uOpen&&(()=>{
+                                            const nameOf = e => (e.concept||'').split(' · ')[0].replace(/\s*\(dividido.*$/,'').trim()||'(sin nombre)';
+                                            const descOf = e => { const parts=(e.concept||'').split(' · '); return parts.slice(1).join(' · '); };
+                                            const groups = {};
+                                            list.forEach(e=>{ const n=nameOf(e); if(!groups[n])groups[n]=[]; groups[n].push(e); });
+                                            const gkeys = Object.keys(groups).sort((a,b)=>
+                                              Math.abs(groups[b].reduce((s,e)=>s+e.amount,0))-Math.abs(groups[a].reduce((s,e)=>s+e.amount,0)));
+                                            const itemRow = (e, indent) => (
+                                              <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,padding:`6px 14px 6px ${indent}px`,borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
+                                                <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})} title="Tocar para editar">
+                                                  <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{descOf(e)||nameOf(e)}</div>
+                                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category} · ✎</div>
+                                                </div>
+                                                <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
+                                                <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
                                               </div>
-                                              <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
-                                              <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
-                                            </div>
-                                          ))}
+                                            );
+                                            return gkeys.map(gn=>{
+                                              const items = groups[gn].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+                                              if (items.length===1) return itemRow({...items[0], concept: items[0].concept}, 40);
+                                              const gTotal = items.reduce((s,e)=>s+e.amount,0);
+                                              const gkey = `${ukey}_${gn}`;
+                                              const gOpen = expOpenName[gkey];
+                                              return (
+                                                <div key={gn}>
+                                                  <button onClick={()=>setExpOpenName(p=>({...p,[gkey]:!p[gkey]}))}
+                                                    style={{width:'100%',display:'flex',alignItems:'center',gap:8,padding:'7px 14px 7px 36px',background:'var(--bg)',border:'none',borderTop:'1px solid var(--border)',cursor:'pointer',textAlign:'left'}}>
+                                                    <span style={{fontSize:8,color:'var(--muted)',transition:'transform .15s',transform:gOpen?'rotate(90deg)':'none'}}>▶</span>
+                                                    <span style={{flex:1,fontSize:11,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{gn}</span>
+                                                    <span style={{fontSize:9,color:'var(--muted)',flexShrink:0}}>×{items.length}</span>
+                                                    <span style={{fontSize:12,fontWeight:800,color:gTotal<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{gTotal<0?'+'+fmtMoney(-gTotal):'−'+fmtMoney(gTotal)}</span>
+                                                  </button>
+                                                  {gOpen&&items.map(e=>itemRow(e,52))}
+                                                </div>
+                                              );
+                                            });
+                                          })()}
                                         </div>
                                       );
                                     })}
