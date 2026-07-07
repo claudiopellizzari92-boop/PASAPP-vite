@@ -3221,6 +3221,7 @@ function ReservationsScreen() {
   const [qbRate, setQbRate] = useState('1.78');    // tasa AWG → USD
   const [expOpenMonth, setExpOpenMonth] = useState({}); // {'2026-01': true}
   const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
+  const [expDelBusy, setExpDelBusy] = useState('');     // texto de progreso al borrar período
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -3842,6 +3843,19 @@ function ReservationsScreen() {
                       if (r.ok) fetchExpenses();
                     };
 
+                    const periodLabel = incMonth!==null ? `${MONTHS_FULL[incMonth]} ${incYear}` : `todo el año ${incYear}`;
+                    const delPeriod = async () => {
+                      if (filtExp.length===0) return;
+                      if (!confirm(`Vas a BORRAR los ${filtExp.length} gastos de ${periodLabel}.\n\nUsalo antes de reimportar ese período desde QuickBooks para evitar duplicados.\n\n¿Continuar?`)) return;
+                      let done = 0;
+                      for (const e of filtExp) {
+                        setExpDelBusy(`Borrando ${++done} de ${filtExp.length}...`);
+                        await deleteExpense(e.id);
+                      }
+                      await fetchExpenses();
+                      setExpDelBusy('');
+                    };
+
                     return (
                       <>
                         {showExpForm&&(
@@ -3878,6 +3892,16 @@ function ReservationsScreen() {
                             </div>
                           ))}
                         </div>
+
+                        {/* Botón borrar período (para reimportar sin duplicar) */}
+                        {filtExp.length>0&&(
+                          <div style={{display:'flex',justifyContent:'flex-end',marginBottom:8}}>
+                            <button onClick={delPeriod} disabled={!!expDelBusy}
+                              style={{background:expDelBusy?'var(--border)':'rgba(184,50,50,.1)',color:'var(--urgent)',border:'1px solid rgba(184,50,50,.3)',borderRadius:8,padding:'5px 11px',fontSize:10,fontWeight:700,cursor:expDelBusy?'default':'pointer'}}>
+                              {expDelBusy || `🗑 Borrar gastos de ${incMonth!==null?MONTHS[incMonth]:incYear} (${filtExp.length})`}
+                            </button>
+                          </div>
+                        )}
 
                         {filtExp.length===0?(
                           <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'8px 0'}}>Sin gastos registrados en este período</div>
