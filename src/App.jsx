@@ -3784,7 +3784,7 @@ function ReservationsScreen() {
                 )}
 
                 </div>
-                </div>
+                <div className="ing-left2">
 
                 {/* ── GASTOS ── */}
                 <div>
@@ -4186,6 +4186,9 @@ function ReservationsScreen() {
                       </>
                     );
                   })()}
+                </div>
+
+                </div>
                 </div>
 
               </>
