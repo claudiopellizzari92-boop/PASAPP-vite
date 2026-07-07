@@ -526,7 +526,9 @@ const parseQuickBooksCSV = (csvText) => {
       if (isNaN(amt) || amt===0) continue;
       const vendor = f[4]||'', desc = f[5]||'';
       if (isNonOperating(desc)) continue;
-      const units = qbDetectUnits(desc);
+      let units = qbDetectUnits(desc);
+      // Pago de condominio en un solo monto (sin unidad): repartir entre las 16 unidades
+      if (units.length===0 && /condominio/i.test(vendor+' '+desc)) units = [...QB_UNIT_IDS];
       rows.push({
         date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
         vendor, tipo: 'Pago',
@@ -4267,7 +4269,7 @@ function ReservationsScreen() {
                                         <div style={{display:'flex',gap:5,marginTop:4,alignItems:'center'}}>
                                           {r.units.length>1?(
                                             <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'2px 7px',borderRadius:6}}>
-                                              {r.units.map(u=>uname(u)).join(' + ')} (dividido)
+                                              {r.units.length>3?`÷ ${r.units.length} unidades`:r.units.map(u=>uname(u)).join(' + ')+' (dividido)'}
                                             </span>
                                           ):(
                                             <select value={r.unit} disabled={qbBusy} onChange={e=>updRow(i,{unit:Number(e.target.value)})}
