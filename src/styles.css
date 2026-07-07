@@ -1,4 +1,4 @@
-    :root{
+:root{
       --bg:#f7f2eb;
       --surface:#ffffff;
       --dark:#1a1208;
@@ -307,3 +307,45 @@
     .sec-pad{padding:11px 11px;display:flex;flex-direction:column;gap:7px}
 
 @keyframes ld{0%,100%{transform:translateX(-100%)}50%{transform:translateX(100%)}}
+
+    /* ═══════════════════════════════════════════════════════
+       MODO ESCRITORIO (pantallas ≥ 900px)
+       El móvil no se ve afectado: estas reglas solo aplican
+       en pantallas anchas. Etapa 1: más aire, sin reorganizar.
+       ═══════════════════════════════════════════════════════ */
+    @media (min-width: 900px) {
+      /* App más ancha, con bordes sutiles para que se vea intencional */
+      .app{
+        max-width:820px;
+        border-left:1px solid rgba(201,150,58,.14);
+        border-right:1px solid rgba(201,150,58,.14);
+        box-shadow:0 0 60px rgba(0,0,0,.4);
+      }
+
+      /* Scrollbar visible pero discreta en PC (en móvil sigue oculta) */
+      .page::-webkit-scrollbar{display:block;width:8px}
+      .page::-webkit-scrollbar-track{background:transparent}
+      .page::-webkit-scrollbar-thumb{background:rgba(201,150,58,.18);border-radius:4px}
+      .page::-webkit-scrollbar-thumb:hover{background:rgba(201,150,58,.35)}
+
+      /* Nav inferior un toque más alta y cómoda con mouse */
+      .nav-item{transition:background .12s}
+      .nav-item:hover{background:rgba(201,150,58,.06)}
+
+      /* Botones y tiles reaccionan al hover */
+      .tcard:hover{border-color:rgba(201,150,58,.35)}
+      .utile:hover{background:rgba(255,255,255,.04)}
+      .hbtn:hover{border-color:var(--gold)}
+
+      /* El FAB no queda pegado al borde de la ventana */
+      .fab{right:calc(50% - 396px)}
+
+      /* Login centrado con el mismo ancho */
+      .login{max-width:820px;margin:0 auto;border-left:1px solid rgba(201,150,58,.14);border-right:1px solid rgba(201,150,58,.14)}
+    }
+
+    /* Pantallas muy anchas: un pelín más de aire */
+    @media (min-width: 1400px) {
+      .app, .login{max-width:880px}
+      .fab{right:calc(50% - 426px)}
+    }
