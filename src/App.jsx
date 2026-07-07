@@ -3267,6 +3267,7 @@ function ReservationsScreen() {
   const [qbBusy, setQbBusy] = useState(false);
   const [qbProgress, setQbProgress] = useState('');
   const [qbRate, setQbRate] = useState('1.78');    // tasa AWG → USD
+  const [qbReplace, setQbReplace] = useState(true); // reemplazar período al importar (evita duplicados)
   const [expOpenMonth, setExpOpenMonth] = useState({}); // {'2026-01': true}
   const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
   const [expDelBusy, setExpDelBusy] = useState('');     // texto de progreso al borrar período
@@ -4124,6 +4125,19 @@ function ReservationsScreen() {
                                 date: r.date,
                               }));
                             });
+
+                            // Reemplazar período: borrar los gastos existentes dentro del rango
+                            // de fechas del archivo, para que reimportar nunca duplique.
+                            if (qbReplace && finalList.length>0) {
+                              const dates = finalList.map(x=>x.date).sort();
+                              const dMin = dates[0], dMax = dates[dates.length-1];
+                              const toDelete = (expenses||[]).filter(x=>x.date>=dMin && x.date<=dMax);
+                              let del = 0;
+                              for (const x of toDelete) {
+                                setQbProgress(`Limpiando período: ${++del} de ${toDelete.length}...`);
+                                await deleteExpense(x.id);
+                              }
+                            }
                             // Intentar carga masiva; si el backend no la tiene, ir de a uno
                             let done = 0, failed = 0;
                             try {
@@ -4164,6 +4178,12 @@ function ReservationsScreen() {
                                   <input type="number" step="0.01" value={qbRate} disabled={qbBusy} onChange={e=>setQbRate(e.target.value)}
                                     style={{width:58,fontSize:12,fontWeight:700,padding:'4px 6px',borderRadius:7,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--gold)',textAlign:'center'}}/>
                                 </div>
+                                <label style={{display:'flex',alignItems:'flex-start',gap:8,marginBottom:8,cursor:'pointer',userSelect:'none',background:'var(--bg)',border:'1px solid var(--border)',borderRadius:9,padding:'8px 10px'}}>
+                                  <input type="checkbox" checked={qbReplace} disabled={qbBusy} onChange={e=>setQbReplace(e.target.checked)} style={{accentColor:'#c9963a',marginTop:2,flexShrink:0}}/>
+                                  <span style={{fontSize:10,color:'var(--muted)',lineHeight:1.4}}>
+                                    <strong style={{color:'var(--text)'}}>Reemplazar gastos del período</strong> — borra los gastos ya registrados en el rango de fechas del archivo antes de importar. Garantiza que no haya duplicados. <span style={{color:'var(--urgent)'}}>Ojo: también borra los cargados a mano en ese rango.</span>
+                                  </span>
+                                </label>
                                 <div style={{display:'flex',gap:6,marginBottom:8}}>
                                   <button onClick={()=>toggleAll(true)} style={{flex:1,fontSize:10,fontWeight:700,padding:'5px',borderRadius:7,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Marcar todos</button>
                                   <button onClick={()=>toggleAll(false)} style={{flex:1,fontSize:10,fontWeight:700,padding:'5px',borderRadius:7,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Desmarcar todos</button>
