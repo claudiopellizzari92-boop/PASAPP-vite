@@ -195,6 +195,18 @@ function AuthProvider({ children }) {
     } catch(e) { return { ok:false }; }
   }, [token]);
 
+  const updateExpense = useCallback(async (id, patch) => {
+    if (!token) return { ok:false };
+    try {
+      const r = await fetch(`${API}/expenses/${id}`, {
+        method:'PATCH',
+        headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${token}` },
+        body: JSON.stringify(patch)
+      });
+      return { ok: r.ok };
+    } catch(e) { return { ok:false }; }
+  }, [token]);
+
   const saveCancellations = useCallback(async (res) => {
     if (!token) return { ok:false, error:'No autenticado' };
     try {
@@ -310,7 +322,7 @@ function AuthProvider({ children }) {
     return () => { clearTimeout(t); evs.forEach(e => window.removeEventListener(e, reset, true)); };
   }, [user]);
 
-  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense}}, children);
+  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense,updateExpense}}, children);
 }
 
 /* CONSTANTS */
@@ -452,6 +464,7 @@ const parseQBFields = (l) => {
 };
 
 const guessExpCategory = (nota) => {
+  if (/amortizaci[óo]n\s+de\s+capital|cuota\s+nro|pr[ée]stamo/i.test(nota)) return 'préstamo';
   if (/limpieza|lavander[íi]a\b/i.test(nota)) return 'limpieza';
   if (/condominio|gas\b|luz|agua|el[ée]ctric|internet|wifi|cable|servicio de/i.test(nota)) return 'servicios';
   if (/suministro|reemplazo|repuesto|compra|lavadora|secadora|nevera|a\.?\s?c\.?|aire|equipo/i.test(nota)) return 'repuestos';
@@ -459,11 +472,10 @@ const guessExpCategory = (nota) => {
   return 'otro';
 };
 
-// Asientos contables que NO son gasto operativo real → se ignoran al importar.
-// - Depreciación / amortización de activos (asiento sin salida de caja)
-// - Amortización de capital de préstamos (reduce deuda, no es gasto)
-const isNonOperating = (nota) =>
-  /depreciaci[óo]n|amortizaci[óo]n\s+de\s+(capital|activo)|amortizaci[óo]n\s+del?\s+pr[ée]stamo/i.test(nota||'');
+// Solo la depreciación se excluye (asiento contable, no hay salida de efectivo).
+// Las cuotas del préstamo SÍ entran: son salida real de caja (categoría "préstamo").
+const isNonOperating = (nota) => /depreciaci[óo]n/i.test(nota||'');
+const isLoanPayment = (nota) => /amortizaci[óo]n\s+de\s+capital/i.test(nota||'');
 
 const QB_UNIT_IDS = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20];
 const qbDetectUnits = (txt) => {
@@ -498,13 +510,15 @@ const parseQuickBooksCSV = (csvText) => {
       const amt = parseFloat((f[5]||'').replace(/[^0-9.\-]/g,''));
       if (isNaN(amt) || amt===0) continue;
       const vendor = f[1]||'', numero = f[3]||'', desc = f[4]||'';
-      if (isNonOperating(desc)) continue; // ignorar depreciaciones/amortizaciones
+      if (isNonOperating(desc)) continue; // ignorar depreciaciones (sin salida de caja)
+      const esPrestamo = isLoanPayment(desc);
       const units = qbDetectUnits(numero + ' ' + desc);
       rows.push({
         date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
-        vendor, tipo: amt<0?'Nota de crédito':'Compra',
+        vendor, tipo: esPrestamo?'Préstamo':(amt<0?'Nota de crédito':'Compra'),
         concept: desc || numero || `(${vendor})`,
-        amount: amt, // con signo: las notas de crédito restan
+        // Cuotas de préstamo vienen negativas en el reporte pero son salida de caja → positivo
+        amount: esPrestamo ? Math.abs(amt) : amt,
         units,
         unit: units[0] || 101,
         category: guessExpCategory(desc),
@@ -533,10 +547,11 @@ const parseQuickBooksCSV = (csvText) => {
     const nota = f[5]||'';
     const amt = parseFloat((f[7]||'').replace(/[^0-9.\-]/g,''));
     if (isNaN(amt) || amt===0) continue;
-    if (isNonOperating(nota)) continue; // ignorar depreciaciones/amortizaciones
+    if (isNonOperating(nota)) continue; // ignorar depreciaciones (sin salida de caja)
+    const esPrestamo = isLoanPayment(nota);
     const units = qbDetectUnits(nota);
-    // "Factura de proveedor" y "Gasto" = gasto real. "Pago de facturas..." se excluye (duplicaría).
-    const esGasto = /factura de proveedor/i.test(tipo) || /^gasto$/i.test(tipo);
+    // "Factura de proveedor" y "Gasto" = gasto real. Cuotas de préstamo también entran.
+    const esGasto = esPrestamo || /factura de proveedor/i.test(tipo) || /^gasto$/i.test(tipo);
     rows.push({
       date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
       vendor, tipo,
@@ -3236,7 +3251,7 @@ function DashboardScreen({ onNavigate }) {
 
 /* RESERVATIONS SCREEN */
 function ReservationsScreen() {
-  const { user, reservations, setReservations, saveReservations, cancellations, setCancellations, saveCancellations, tasks:allTasks, expenses, fetchExpenses, addExpense, deleteExpense } = useAuth();
+  const { user, reservations, setReservations, saveReservations, cancellations, setCancellations, saveCancellations, tasks:allTasks, expenses, fetchExpenses, addExpense, deleteExpense, updateExpense } = useAuth();
   const tasks = allTasks || [];
   const now = new Date();
   const isAdmin = user?.username === 'admin';
@@ -3256,6 +3271,7 @@ function ReservationsScreen() {
   const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
   const [expDelBusy, setExpDelBusy] = useState('');     // texto de progreso al borrar período
   const [qbCompare, setQbCompare] = useState(null);     // {facturado, cobrado} del reporte por fecha
+  const [editExp, setEditExp] = useState(null);          // gasto en edición
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -3922,7 +3938,7 @@ function ReservationsScreen() {
                                 {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
                               </select>
                               <select className="minp msel" style={{flex:1}} value={expF.category} onChange={e=>setExpF(p=>({...p,category:e.target.value}))}>
-                                {['mantenimiento','limpieza','repuestos','servicios','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
                               </select>
                             </div>
                             <input className="minp" value={expF.concept} onChange={e=>setExpF(p=>({...p,concept:e.target.value}))} placeholder="Concepto (ej: repuesto A/C, plomero...)"/>
@@ -4024,11 +4040,11 @@ function ReservationsScreen() {
                                           {/* Gastos de la unidad */}
                                           {uOpen&&list.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>(
                                             <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 14px 7px 40px',borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
-                                              <div style={{flex:1,minWidth:0}}>
+                                              <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})} title="Tocar para editar">
                                                 <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.concept}</div>
-                                                <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category}</div>
+                                                <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category} · ✎</div>
                                               </div>
-                                              <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
+                                              <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
                                               <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
                                             </div>
                                           ))}
@@ -4041,6 +4057,48 @@ function ReservationsScreen() {
                             </div>
                           );
                         })()}
+
+                        {/* ── Modal editar gasto ── */}
+                        {editExp&&(
+                          <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&setEditExp(null)}>
+                            <div style={{background:'var(--surface)',borderRadius:14,padding:'18px 16px',maxWidth:360,width:'92%'}}>
+                              <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:12}}>Editar gasto</div>
+                              <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                                <div style={{display:'flex',gap:8}}>
+                                  <select className="minp msel" style={{flex:1}} value={editExp.unitId} onChange={e=>setEditExp(p=>({...p,unitId:Number(e.target.value)}))}>
+                                    {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                                  </select>
+                                  <select className="minp msel" style={{flex:1}} value={editExp.category} onChange={e=>setEditExp(p=>({...p,category:e.target.value}))}>
+                                    {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                  </select>
+                                </div>
+                                <input className="minp" value={editExp.concept} onChange={e=>setEditExp(p=>({...p,concept:e.target.value}))} placeholder="Concepto"/>
+                                <div style={{display:'flex',gap:8}}>
+                                  <input className="minp" style={{flex:1}} type="number" inputMode="decimal" value={editExp.amount} onChange={e=>setEditExp(p=>({...p,amount:e.target.value}))} placeholder="Monto $"/>
+                                  <input className="minp" style={{flex:1}} type="date" value={editExp.date} onChange={e=>setEditExp(p=>({...p,date:e.target.value}))}/>
+                                </div>
+                                <div style={{display:'flex',gap:8,marginTop:4}}>
+                                  <button onClick={()=>setEditExp(null)} style={{flex:1,background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:9,padding:'11px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Cancelar</button>
+                                  <button disabled={expBusy||!String(editExp.concept).trim()||editExp.amount===''} onClick={async()=>{
+                                    setExpBusy(true);
+                                    const r = await updateExpense(editExp.id, {
+                                      unitId: Number(editExp.unitId),
+                                      concept: String(editExp.concept).trim(),
+                                      amount: Number(editExp.amount),
+                                      category: editExp.category,
+                                      date: editExp.date,
+                                    });
+                                    setExpBusy(false);
+                                    if (r.ok) { setEditExp(null); fetchExpenses(); }
+                                    else alert('No se pudo guardar. ¿Actualizaste el backend con el endpoint de edición?');
+                                  }} style={{flex:2,background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:9,padding:'11px',fontWeight:800,fontSize:13,cursor:'pointer'}}>
+                                    {expBusy?'Guardando...':'Guardar cambios'}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
 
                         {/* ── Vista previa de importación QuickBooks ── */}
                         {qbRows&&(()=>{
@@ -4132,7 +4190,7 @@ function ReservationsScreen() {
                                           )}
                                           <select value={r.category} disabled={qbBusy} onChange={e=>updRow(i,{category:e.target.value})}
                                             style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--muted)',maxWidth:100}}>
-                                            {['mantenimiento','limpieza','repuestos','servicios','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                            {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
                                           </select>
                                         </div>
                                       </div>
