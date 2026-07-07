@@ -3815,7 +3815,21 @@ function ReservationsScreen() {
                       return true;
                     }).sort((a,b)=>b.date.localeCompare(a.date));
                     const totalExp = filtExp.reduce((s,e)=>s+e.amount,0);
-                    const neto = totalIncome - totalExp;
+
+                    // Ingresos COBRADOS: las reservas se cobran el mes siguiente al checkout,
+                    // así que el mes actual (y futuros) del año en curso todavía no se cobraron.
+                    const esAnioEnCurso = incYear===now.getFullYear();
+                    const mesActual = now.getMonth(); // 0-11
+                    const cobradoIncome = (incMonth!==null)
+                      // Viendo un mes puntual: cobrado = solo si ese mes ya pasó (es anterior al actual, o año pasado)
+                      ? ((esAnioEnCurso && incMonth>=mesActual) ? 0 : totalIncome)
+                      // Viendo el año: sumar reservas cuyo checkout cae en meses ya cobrados
+                      : (esAnioEnCurso
+                          ? reservations.filter(r=>r.checkOut.getFullYear()===incYear && r.checkOut.getMonth()<mesActual)
+                              .reduce((s,r)=>s+parseIncome(r.income),0)
+                          : totalIncome);
+                    const hayPendiente = cobradoIncome !== totalIncome;
+                    const neto = cobradoIncome - totalExp;
 
                     const saveExp = async () => {
                       if (!expF.concept.trim() || !expF.amount) return;
@@ -3880,18 +3894,26 @@ function ReservationsScreen() {
                         )}
 
                         {/* Resumen ingresos - gastos = neto */}
-                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:10}}>
-                          {[
-                            {l:'Ingresos', v:fmtMoney(totalIncome), c:'var(--done)'},
-                            {l:'Gastos',   v:'−'+fmtMoney(totalExp), c:'var(--urgent)'},
-                            {l:'Neto',     v:fmtMoney(neto), c: neto>=0?'var(--gold)':'var(--urgent)'},
-                          ].map((k,i)=>(
-                            <div key={i} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
-                              <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:k.c}}>{k.v}</div>
-                              <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>{k.l}</div>
-                            </div>
-                          ))}
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:hayPendiente?4:10}}>
+                          <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
+                            <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:'var(--done)'}}>{fmtMoney(cobradoIncome)}</div>
+                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>{hayPendiente?'Cobrado':'Ingresos'}</div>
+                            {hayPendiente&&<div style={{fontSize:8,color:'var(--muted)',marginTop:2}}>de {fmtMoney(totalIncome)} total</div>}
+                          </div>
+                          <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
+                            <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:'var(--urgent)'}}>−{fmtMoney(totalExp)}</div>
+                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Gastos</div>
+                          </div>
+                          <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
+                            <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:neto>=0?'var(--gold)':'var(--urgent)'}}>{fmtMoney(neto)}</div>
+                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Neto{hayPendiente?' cobrado':''}</div>
+                          </div>
                         </div>
+                        {hayPendiente&&(
+                          <div style={{fontSize:9,color:'var(--muted)',textAlign:'center',marginBottom:10,fontStyle:'italic'}}>
+                            Los ingresos se cobran el mes siguiente al checkout · {incMonth!==null?'este mes aún no cobrado':`meses desde ${MONTHS[mesActual]} aún no cobrados`}
+                          </div>
+                        )}
 
                         {/* Botón borrar período (para reimportar sin duplicar) */}
                         {filtExp.length>0&&(
