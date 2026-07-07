@@ -3211,6 +3211,8 @@ function ReservationsScreen() {
   const [qbBusy, setQbBusy] = useState(false);
   const [qbProgress, setQbProgress] = useState('');
   const [qbRate, setQbRate] = useState('1.78');    // tasa AWG → USD
+  const [expOpenMonth, setExpOpenMonth] = useState({}); // {'2026-01': true}
+  const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -3871,20 +3873,77 @@ function ReservationsScreen() {
 
                         {filtExp.length===0?(
                           <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'8px 0'}}>Sin gastos registrados en este período</div>
-                        ):(
-                          <div style={{display:'flex',flexDirection:'column',gap:5}}>
-                            {filtExp.map(e=>(
-                              <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 12px'}}>
-                                <div style={{flex:1,minWidth:0}}>
-                                  <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{uname(e.unitId)} · {e.concept}</div>
-                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category}</div>
-                                </div>
-                                <div style={{fontSize:13,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
-                                <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                        ):(()=>{
+                          const MONTHS_FULL2 = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+                          // Agrupar por mes (YYYY-MM) → por unidad
+                          const byMonth = {};
+                          filtExp.forEach(e=>{
+                            const mk = (e.date||'').slice(0,7); // YYYY-MM
+                            if (!byMonth[mk]) byMonth[mk] = {};
+                            if (!byMonth[mk][e.unitId]) byMonth[mk][e.unitId] = [];
+                            byMonth[mk][e.unitId].push(e);
+                          });
+                          const monthKeys = Object.keys(byMonth).sort((a,b)=>b.localeCompare(a));
+                          // Si hay un solo mes (ej: filtrado por mes), abrirlo por defecto
+                          const singleMonth = monthKeys.length===1;
+
+                          return (
+                            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                              {monthKeys.map(mk=>{
+                                const units = byMonth[mk];
+                                const monthTotal = Object.values(units).flat().reduce((s,e)=>s+e.amount,0);
+                                const [y,m] = mk.split('-');
+                                const mLabel = `${MONTHS_FULL2[parseInt(m)-1]} ${y}`;
+                                const mOpen = singleMonth || expOpenMonth[mk];
+                                const unitKeys = Object.keys(units).sort((a,b)=>
+                                  units[b].reduce((s,e)=>s+e.amount,0)-units[a].reduce((s,e)=>s+e.amount,0));
+
+                                return (
+                                  <div key={mk} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
+                                    {/* Cabecera del mes */}
+                                    <button onClick={()=>setExpOpenMonth(p=>({...p,[mk]:!p[mk]}))}
+                                      style={{width:'100%',display:'flex',alignItems:'center',gap:8,padding:'11px 14px',background:'var(--dark2)',border:'none',cursor:'pointer',textAlign:'left'}}>
+                                      <span style={{fontSize:11,color:'var(--muted)',transition:'transform .15s',transform:mOpen?'rotate(90deg)':'none'}}>▶</span>
+                                      <span style={{flex:1,fontSize:13,fontWeight:800,color:'#fff'}}>{mLabel}</span>
+                                      <span style={{fontSize:10,color:'var(--muted)'}}>{Object.values(units).flat().length} gastos</span>
+                                      <span style={{fontSize:14,fontWeight:800,color:monthTotal<0?'var(--done)':'var(--gold)',fontFamily:'var(--serif)'}}>{monthTotal<0?'+'+fmtMoney(-monthTotal):fmtMoney(monthTotal)}</span>
+                                    </button>
+
+                                    {/* Unidades del mes */}
+                                    {mOpen&&unitKeys.map(uk=>{
+                                      const list = units[uk];
+                                      const uTotal = list.reduce((s,e)=>s+e.amount,0);
+                                      const ukey = `${mk}_${uk}`;
+                                      const uOpen = expOpenUnit[ukey];
+                                      return (
+                                        <div key={uk} style={{borderTop:'1px solid var(--border)'}}>
+                                          <button onClick={()=>setExpOpenUnit(p=>({...p,[ukey]:!p[ukey]}))}
+                                            style={{width:'100%',display:'flex',alignItems:'center',gap:8,padding:'8px 14px 8px 24px',background:'none',border:'none',cursor:'pointer',textAlign:'left'}}>
+                                            <span style={{fontSize:9,color:'var(--muted)',transition:'transform .15s',transform:uOpen?'rotate(90deg)':'none'}}>▶</span>
+                                            <span style={{flex:1,fontSize:12,fontWeight:700,color:'var(--gold)'}}>{uname(parseInt(uk))}</span>
+                                            <span style={{fontSize:9,color:'var(--muted)'}}>{list.length}</span>
+                                            <span style={{fontSize:12,fontWeight:800,color:uTotal<0?'var(--done)':'var(--text)'}}>{uTotal<0?'+'+fmtMoney(-uTotal):'−'+fmtMoney(uTotal)}</span>
+                                          </button>
+                                          {/* Gastos de la unidad */}
+                                          {uOpen&&list.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>(
+                                            <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 14px 7px 40px',borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
+                                              <div style={{flex:1,minWidth:0}}>
+                                                <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.concept}</div>
+                                                <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{e.date} · {e.category}</div>
+                                              </div>
+                                              <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0}}>{e.amount<0?'+'+fmtMoney(-e.amount):'−'+fmtMoney(e.amount)}</div>
+                                              <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
 
                         {/* ── Vista previa de importación QuickBooks ── */}
                         {qbRows&&(()=>{
