@@ -551,6 +551,31 @@ const parseQuickBooksCSV = (csvText) => {
   return rows;
 };
 
+// Parser del reporte "Lista de transacciones por fecha" de QuickBooks.
+// Extrae ingresos: Facturas emitidas (devengado) y Pagos recibidos (cobrado), por mes.
+const parseQBIncomeCSV = (csvText) => {
+  const lines = csvText.split('\n');
+  const facturado = {}, cobrado = {};
+  let nFact = 0, nPago = 0;
+  let headerFound = false;
+  for (const line of lines) {
+    if (!headerFound) {
+      if (line.includes('Fecha') && line.includes('Tipo de transacción') && line.includes('Importe')) headerFound = true;
+      continue;
+    }
+    const f = parseQBFields(line);
+    const dateM = (f[0]||'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (!dateM) continue;
+    const tipo = f[1]||'';
+    const amt = parseFloat((f[8]||'').replace(/[^0-9.\-]/g,''));
+    if (isNaN(amt) || amt===0) continue;
+    const ym = `${dateM[3]}-${dateM[2]}`; // YYYY-MM
+    if (tipo === 'Factura')      { facturado[ym] = (facturado[ym]||0) + amt; nFact++; }
+    else if (tipo === 'Pago')    { cobrado[ym]   = (cobrado[ym]||0)   + amt; nPago++; }
+  }
+  return { facturado, cobrado, nFact, nPago };
+};
+
 const SPECIAL   = {100:'Recepción',101:'Áreas Comunes'};
 const uname     = id => SPECIAL[id] ?? `PAS ${id}`;
 const pColor    = p => p==='urgente'?'#b83232':p==='normal'?'#c9963a':p==='programado'?'#2d6e4e':'#2471a3';
@@ -3230,6 +3255,7 @@ function ReservationsScreen() {
   const [expOpenMonth, setExpOpenMonth] = useState({}); // {'2026-01': true}
   const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
   const [expDelBusy, setExpDelBusy] = useState('');     // texto de progreso al borrar período
+  const [qbCompare, setQbCompare] = useState(null);     // {facturado, cobrado} del reporte por fecha
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'calendar' | 'ingresos'
   const [viewDay, setViewDay] = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
   const addDays = (d, n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
@@ -4184,6 +4210,84 @@ function ReservationsScreen() {
                           {priceUnit!=='all'&&' · '+uname(parseInt(priceUnit))}
                         </div>
                       </>
+                    );
+                  })()}
+                </div>
+
+                {/* ── COMPARAR CON QUICKBOOKS ── */}
+                <div>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                    <div className="dash-section-title" style={{marginBottom:0}}>🔍 Verificar vs QuickBooks</div>
+                    <label style={{background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:800,cursor:'pointer'}}>
+                      ⬆ Transacciones por fecha
+                      <input type="file" accept=".csv" style={{display:'none'}} onChange={e=>{
+                        const file=e.target.files[0]; if(!file) return;
+                        const rd=new FileReader();
+                        rd.onload=ev=>{
+                          const r = parseQBIncomeCSV(ev.target.result);
+                          if (r.nFact===0 && r.nPago===0) { alert('No se encontraron facturas ni pagos. ¿Es el reporte "Lista de transacciones por fecha" de QuickBooks?'); return; }
+                          setQbCompare(r);
+                        };
+                        rd.readAsText(file);
+                        e.target.value='';
+                      }}/>
+                    </label>
+                  </div>
+                  {!qbCompare?(
+                    <div style={{fontSize:10,color:'var(--muted)',lineHeight:1.5,background:'var(--surface)',border:'1px dashed var(--border)',borderRadius:10,padding:'10px 12px'}}>
+                      Subí el reporte <strong>"Lista de transacciones por fecha"</strong> de QuickBooks para comparar mes a mes lo que estima Hostaway contra lo realmente facturado y cobrado. No se guarda nada — es solo una verificación.
+                    </div>
+                  ):(()=>{
+                    const rate = parseFloat(qbRate) || 1.78;
+                    const rows = MONTHS.map((lbl,i)=>{
+                      const ym = `${incYear}-${String(i+1).padStart(2,'0')}`;
+                      const hostaway = monthlyIncome[i]?.total || 0;
+                      const fact = (qbCompare.facturado[ym]||0)/rate;
+                      const cobr = (qbCompare.cobrado[ym]||0)/rate;
+                      return { lbl, hostaway, fact, cobr };
+                    }).filter(r=>r.hostaway>0||r.fact>0||r.cobr>0);
+                    if (rows.length===0) return <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'8px 0'}}>Sin datos de {incYear} en el reporte subido</div>;
+                    const tot = rows.reduce((a,r)=>({hostaway:a.hostaway+r.hostaway,fact:a.fact+r.fact,cobr:a.cobr+r.cobr}),{hostaway:0,fact:0,cobr:0});
+                    const cell = {padding:'6px 4px',fontSize:10,textAlign:'right',whiteSpace:'nowrap'};
+                    const diffCol = (d,base) => Math.abs(d)<1?'var(--muted)':(Math.abs(d)/(base||1)<0.03?'var(--muted)':(d<0?'var(--urgent)':'var(--done)'));
+                    return (
+                      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'10px 12px',overflowX:'auto'}} className="hide-scroll">
+                        <table style={{width:'100%',borderCollapse:'collapse'}}>
+                          <thead>
+                            <tr style={{borderBottom:'1.5px solid var(--border)'}}>
+                              <th style={{...cell,textAlign:'left',color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:.5,fontSize:8}}>Mes</th>
+                              <th style={{...cell,color:'var(--muted)',fontWeight:800,fontSize:8,textTransform:'uppercase'}}>Hostaway</th>
+                              <th style={{...cell,color:'var(--muted)',fontWeight:800,fontSize:8,textTransform:'uppercase'}}>Facturado</th>
+                              <th style={{...cell,color:'var(--muted)',fontWeight:800,fontSize:8,textTransform:'uppercase'}}>Cobrado</th>
+                              <th style={{...cell,color:'var(--muted)',fontWeight:800,fontSize:8,textTransform:'uppercase'}}>Δ Fact−Host</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map((r,i)=>{
+                              const d = r.fact - r.hostaway;
+                              return (
+                                <tr key={i} style={{borderBottom:i<rows.length-1?'1px solid var(--border)':'none'}}>
+                                  <td style={{...cell,textAlign:'left',fontWeight:700,color:'var(--text)'}}>{r.lbl}</td>
+                                  <td style={cell}>{r.hostaway?fmtMoney(r.hostaway):'—'}</td>
+                                  <td style={cell}>{r.fact?fmtMoney(Math.round(r.fact)):'—'}</td>
+                                  <td style={cell}>{r.cobr?fmtMoney(Math.round(r.cobr)):'—'}</td>
+                                  <td style={{...cell,fontWeight:700,color:r.fact?diffCol(d,r.hostaway):'var(--muted)'}}>{r.fact?(d>=0?'+':'')+fmtMoney(Math.round(d)):'—'}</td>
+                                </tr>
+                              );
+                            })}
+                            <tr style={{borderTop:'1.5px solid var(--border)'}}>
+                              <td style={{...cell,textAlign:'left',fontWeight:800,color:'var(--gold)'}}>TOTAL</td>
+                              <td style={{...cell,fontWeight:800,color:'var(--gold)'}}>{fmtMoney(tot.hostaway)}</td>
+                              <td style={{...cell,fontWeight:800,color:'var(--gold)'}}>{fmtMoney(Math.round(tot.fact))}</td>
+                              <td style={{...cell,fontWeight:800,color:'var(--gold)'}}>{fmtMoney(Math.round(tot.cobr))}</td>
+                              <td style={{...cell,fontWeight:800,color:diffCol(tot.fact-tot.hostaway,tot.hostaway)}}>{(tot.fact-tot.hostaway>=0?'+':'')+fmtMoney(Math.round(tot.fact-tot.hostaway))}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                        <div style={{fontSize:9,color:'var(--muted)',marginTop:8,lineHeight:1.5,fontStyle:'italic'}}>
+                          Hostaway: estimado por checkout · Facturado: facturas emitidas ese mes (÷{rate}) · Cobrado: pagos recibidos ese mes (÷{rate}). El cobrado de un mes suele corresponder al hospedaje del mes anterior.
+                        </div>
+                      </div>
                     );
                   })()}
                 </div>
