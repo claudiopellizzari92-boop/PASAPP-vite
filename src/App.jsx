@@ -3023,6 +3023,8 @@ function DashboardScreen({ onNavigate }) {
       </div>
 
       <div className="dash-body">
+        <div className="dash-cols">
+        <div className="dash-col">
 
         {/* VENCIDAS */}
         {vencidas.length>0&&(
@@ -3099,6 +3101,9 @@ function DashboardScreen({ onNavigate }) {
             </div>
           </div>
         )}
+
+        </div>
+        <div className="dash-col">
 
         {/* OCCUPANCY SECTION - only if reservations loaded */}
         {reservations.length>0&&(
@@ -3184,6 +3189,9 @@ function DashboardScreen({ onNavigate }) {
             </button>
           </div>
         )}
+
+        </div>
+        </div>
 
         {tasks.length===0&&(
           <div className="empty" style={{marginTop:40}}>
@@ -3607,6 +3615,9 @@ function ReservationsScreen() {
                   ))}
                 </div>
 
+                <div className="ing-grid">
+                <div className="ing-left">
+
                 {/* KPI Cards */}
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
                   <div style={{background:'var(--dark2)',border:'1px solid rgba(201,150,58,.2)',borderRadius:14,padding:'14px 16px',gridColumn:'1/-1'}}>
@@ -3740,6 +3751,9 @@ function ReservationsScreen() {
                   </div>
                 )}
 
+                </div>
+                <div className="ing-right">
+
                 {/* Per-unit breakdown */}
                 {byUnit.length>0&&(
                   <div>
@@ -3768,6 +3782,9 @@ function ReservationsScreen() {
                     </div>
                   </div>
                 )}
+
+                </div>
+                </div>
 
                 {/* ── GASTOS ── */}
                 <div>
