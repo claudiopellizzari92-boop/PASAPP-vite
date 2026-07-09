@@ -3074,7 +3074,7 @@ function RecordsScreen() {
                 <div className="empty-s">No hay mediciones de {type} para este período.</div>
               </div>
             ) : (
-              <div style={{padding:'8px 11px',display:'flex',flexDirection:'column',gap:8,paddingBottom:80}}>
+              <div className="rec-grid" style={{padding:'8px 11px',display:'flex',flexDirection:'column',gap:8,paddingBottom:80}}>
                 {unitGroups.map((grp,i)=>(
                   <div key={i} style={{background:'var(--surface)',borderRadius:'var(--radius)',border:'1px solid var(--border)',overflow:'hidden'}}>
                     {/* Unit header */}
@@ -5103,6 +5103,9 @@ function ReservationsScreen() {
           </div>}
           <div style={{height:1,background:'var(--border)'}}/>
 
+          <div className="res-grid">
+          <div className="res-left">
+
           {/* CURRENT OCCUPANCY */}
           <div>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
@@ -5161,6 +5164,9 @@ function ReservationsScreen() {
               })}
             </div>
           </div>}
+
+          </div>
+          <div className="res-right">
 
           {/* OCCUPANCY CHART */}
           <div>
@@ -5343,6 +5349,9 @@ function ReservationsScreen() {
                 );
               })}
             </div>
+          </div>
+
+          </div>
           </div>
 
         </div>
