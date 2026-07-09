@@ -1490,12 +1490,12 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
                 {inactivas.length>0&&(
                   <div>
                     <div className="dash-section-title" style={{marginBottom:8}}>👁 Sin actividad reciente</div>
-                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:7}}>
                       {inactivas.map(x=>(
-                        <div key={x.uid} style={{display:'flex',alignItems:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'9px 12px'}}>
-                          <span style={{flex:1,fontSize:12,fontWeight:700,color:'var(--gold)'}}>{uname(x.uid)}</span>
-                          <span style={{fontSize:10,color:'var(--muted)'}}>
-                            {x.dias===null?'sin tareas registradas':`última tarea hace ${x.dias} días`}
+                        <div key={x.uid} style={{display:'flex',alignItems:'center',gap:9,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 11px'}}>
+                          <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'3px 8px',borderRadius:6,flexShrink:0,letterSpacing:.3}}>{uname(x.uid)}</span>
+                          <span style={{fontSize:10,color:'var(--muted)',lineHeight:1.3}}>
+                            {x.dias===null?'sin tareas registradas':`hace ${x.dias} días`}
                           </span>
                         </div>
                       ))}
@@ -1508,16 +1508,28 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
                 {completadas.length>0&&(
                   <div>
                     <div className="dash-section-title" style={{marginBottom:8}}>✔ Últimas completadas</div>
-                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
-                      {completadas.map(t=>(
-                        <div key={t.id} onClick={()=>setSel(t)} style={{display:'flex',alignItems:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'9px 12px',cursor:'pointer',opacity:.85}}>
-                          <div style={{flex:1,minWidth:0}}>
-                            <div style={{fontSize:12,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.title}</div>
-                            <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{uname(t.unitId)}{t.assignee?` · ${t.assignee}`:''} · {fmtD(t._done)}</div>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(270px,1fr))',gap:8}}>
+                      {completadas.map(t=>{
+                        const foto = t.photoComplete || t.photoStart;
+                        const catIco = {electricidad:'⚡',plomería:'🚿',aires:'❄️',pintura:'🎨',cerrajería:'🔑',mantenimiento:'🔧',limpieza:'🧹'}[t.category] || '✓';
+                        return (
+                          <div key={t.id} onClick={()=>setSel(t)} style={{display:'flex',alignItems:'center',gap:11,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'9px 11px',cursor:'pointer'}}>
+                            {foto?(
+                              <img src={foto} alt="" loading="lazy" style={{width:52,height:52,borderRadius:9,objectFit:'cover',flexShrink:0,border:'1px solid var(--border)'}}/>
+                            ):(
+                              <div style={{width:52,height:52,borderRadius:9,flexShrink:0,background:'var(--bg)',border:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>{catIco}</div>
+                            )}
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:12,fontWeight:650,color:'var(--text)',lineHeight:1.3,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{t.title}</div>
+                              <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4,flexWrap:'wrap'}}>
+                                <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'2px 7px',borderRadius:6,letterSpacing:.3}}>{uname(t.unitId)}</span>
+                                <span style={{fontSize:9,color:'var(--muted)'}}>{t.assignee||''}{t.assignee?' · ':''}{fmtD(t._done)}</span>
+                              </div>
+                            </div>
+                            <Ic d={D.check} sz={15} col="var(--done)"/>
                           </div>
-                          <Ic d={D.check} sz={14} col="var(--done)"/>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
