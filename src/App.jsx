@@ -3253,6 +3253,7 @@ function DashboardScreen({ onNavigate }) {
           const titleFor = ev => `Verificación ${ev.tipo} · ${uname(ev.unitId)}`;
           const yaExiste = ev => tasks.some(t=>t.title===titleFor(ev) && String(t.dueDate||'').slice(0,10)===iso(ev.date));
           const pendientes = eventos.filter(ev=>!yaExiste(ev));
+          if (pendientes.length===0) return null; // todas creadas → la sección desaparece
 
           const CHECK_ENTRADA = 'Verificar que el equipo de limpieza dejó la unidad lista para el huésped:\n☐ Limpieza general (pisos, superficies, cocina)\n☐ Baños impecables\n☐ Sábanas y toallas completas y limpias\n☐ A/C funcionando\n☐ Agua caliente\n☐ Electrodomésticos operativos\n☐ Inventario completo (controles, secador, utensilios)\n☐ Sin daños visibles ni olores\n\nSi algo falla: foto + reportar a la compañía de rentas.';
           const CHECK_SALIDA  = 'Inspeccionar la unidad tras la salida del huésped:\n☐ Daños o faltantes causados por el huésped\n☐ Objetos olvidados\n☐ Estado de electrodomésticos y A/C\n☐ Novedades para reportar a la compañía de rentas\n\nRegistrar con fotos si hay algo anormal.';
@@ -3279,9 +3280,9 @@ function DashboardScreen({ onNavigate }) {
             setVerifBusy('');
           };
 
-          // Agrupar por día
+          // Agrupar por día (solo las pendientes: al crearse desaparecen de acá)
           const dias = {};
-          eventos.forEach(ev=>{ const k=iso(ev.date); if(!dias[k])dias[k]=[]; dias[k].push(ev); });
+          pendientes.forEach(ev=>{ const k=iso(ev.date); if(!dias[k])dias[k]=[]; dias[k].push(ev); });
           const diaKeys = Object.keys(dias).sort();
           const hoyIso = iso(now);
           const mananaIso = iso(new Date(now.getFullYear(),now.getMonth(),now.getDate()+1));
@@ -3302,7 +3303,6 @@ function DashboardScreen({ onNavigate }) {
               <div style={{display:'flex',flexDirection:'column',gap:6}}>
                 {diaKeys.map(dk=>{
                   const evs = dias[dk];
-                  const pend = evs.filter(ev=>!yaExiste(ev));
                   const abierto = verifOpenDay[dk] ?? (dk===hoyIso||dk===mananaIso);
                   return (
                     <div key={dk} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
@@ -3313,30 +3313,26 @@ function DashboardScreen({ onNavigate }) {
                           <span style={{fontSize:11,fontWeight:800,color:dk===hoyIso?'var(--gold)':'var(--text)',textTransform:'capitalize'}}>{fmtDia(dk)}</span>
                           <span style={{fontSize:9,color:'var(--muted)'}}>{evs.length} unidad{evs.length!==1?'es':''}</span>
                         </button>
-                        {pend.length>0?(
-                          <button onClick={()=>crearVarias(pend,dk)} disabled={!!verifBusy}
-                            style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',borderRadius:7,padding:'3px 9px',fontSize:9,fontWeight:800,cursor:'pointer',flexShrink:0}}>
-                            {verifBusy===dk?'...':`Crear ${pend.length}`}
-                          </button>
-                        ):(
-                          <span style={{fontSize:9,fontWeight:700,color:'var(--done)',flexShrink:0}}>✓ Listas</span>
-                        )}
+                        <button onClick={()=>crearVarias(evs,dk)} disabled={!!verifBusy}
+                          style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',borderRadius:7,padding:'3px 9px',fontSize:9,fontWeight:800,cursor:'pointer',flexShrink:0}}>
+                          {verifBusy===dk?'...':`Crear ${evs.length}`}
+                        </button>
                       </div>
                       {abierto&&(
                         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:6,padding:'0 10px 10px'}}>
                           {evs.map((ev,i)=>{
-                            const existe = yaExiste(ev);
                             const ui = tipoUi[ev.tipo];
                             const g = ev.guestIn||ev.guestOut||'';
+                            const busy = verifBusy===titleFor(ev)+iso(ev.date);
                             return (
-                              <div key={i} onClick={()=>!existe&&!verifBusy&&crearVarias([ev],titleFor(ev)+iso(ev.date))}
-                                style={{display:'flex',alignItems:'center',gap:7,background:'var(--bg)',border:'1px solid var(--border)',borderRadius:9,padding:'7px 9px',opacity:existe?.5:1,cursor:existe?'default':'pointer'}}>
+                              <div key={i} onClick={()=>!verifBusy&&crearVarias([ev],titleFor(ev)+iso(ev.date))}
+                                style={{display:'flex',alignItems:'center',gap:7,background:'var(--bg)',border:'1px solid var(--border)',borderRadius:9,padding:'7px 9px',cursor:'pointer'}}>
                                 <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'2px 7px',borderRadius:5,flexShrink:0}}>{uname(ev.unitId)}</span>
                                 <div style={{flex:1,minWidth:0}}>
                                   <span style={{fontSize:10,fontWeight:800,color:ui.col}}>{ui.ico} {ui.lbl}</span>
                                   {g&&<div style={{fontSize:8,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{g}</div>}
                                 </div>
-                                <span style={{fontSize:existe?9:13,fontWeight:800,color:existe?'var(--done)':'var(--gold)',flexShrink:0}}>{existe?'✓':(verifBusy===titleFor(ev)+iso(ev.date)?'·':'+')}</span>
+                                <span style={{fontSize:13,fontWeight:800,color:'var(--gold)',flexShrink:0}}>{busy?'·':'+'}</span>
                               </div>
                             );
                           })}
