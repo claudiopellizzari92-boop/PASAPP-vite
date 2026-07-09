@@ -3089,9 +3089,10 @@ function WakeMessage() {
 
 /* DASHBOARD SCREEN */
 function DashboardScreen({ onNavigate }) {
-  const { user, tasks:allTasks, measurements, loadDemoData, reservations } = useAuth();
+  const { user, tasks:allTasks, measurements, loadDemoData, reservations, authFetch, reloadTasks } = useAuth();
   const tasks = allTasks || [];
   const now = new Date();
+  const [verifBusy, setVerifBusy] = useState('');
 
   // ── Occupancy calculations ────────────────────────────────────
   const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101); // exclude Recepcion/Areas Comunes
@@ -3225,6 +3226,90 @@ function DashboardScreen({ onNavigate }) {
       <div className="dash-body">
         <div className="dash-cols">
         <div className="dash-col">
+
+        {/* ── VERIFICACIONES DE UNIDADES (salidas y entradas próximas) ── */}
+        {(()=>{
+          const in7 = new Date(now.getFullYear(),now.getMonth(),now.getDate()+7);
+          const hoy0 = new Date(now.getFullYear(),now.getMonth(),now.getDate());
+          const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+          const eventos = [];
+          reservations.forEach(r=>{
+            if (r.checkOut>=hoy0 && r.checkOut<=in7) eventos.push({tipo:'salida', date:r.checkOut, unitId:r.unitId, guest:r.guest});
+            if (r.checkIn >=hoy0 && r.checkIn <=in7) eventos.push({tipo:'entrada', date:r.checkIn, unitId:r.unitId, guest:r.guest});
+          });
+          if (eventos.length===0) return null;
+          eventos.sort((a,b)=>a.date-b.date);
+
+          const titleFor = ev => `Verificación ${ev.tipo} · ${uname(ev.unitId)}`;
+          const yaExiste = ev => tasks.some(t=>t.title===titleFor(ev) && String(t.dueDate||'').slice(0,10)===iso(ev.date));
+          const pendientes = eventos.filter(ev=>!yaExiste(ev));
+
+          const CHECK_ENTRADA = 'Verificar que el equipo de limpieza dejó la unidad lista para el huésped:\n☐ Limpieza general (pisos, superficies, cocina)\n☐ Baños impecables\n☐ Sábanas y toallas completas y limpias\n☐ A/C funcionando\n☐ Agua caliente\n☐ Electrodomésticos operativos\n☐ Inventario completo (controles, secador, utensilios)\n☐ Sin daños visibles ni olores\n\nSi algo falla: foto + reportar a la compañía de rentas.';
+          const CHECK_SALIDA  = 'Inspeccionar la unidad tras la salida del huésped:\n☐ Daños o faltantes causados por el huésped\n☐ Objetos olvidados\n☐ Estado de electrodomésticos y A/C\n☐ Novedades para reportar a la compañía de rentas\n\nRegistrar con fotos si hay algo anormal.';
+
+          const crear = async (ev) => {
+            const payload = {
+              unitId: Number(ev.unitId), level:'N1', category:'mantenimiento',
+              title: titleFor(ev),
+              description: (ev.tipo==='entrada'?CHECK_ENTRADA:CHECK_SALIDA) + (ev.guest?`\n\nReserva: ${ev.guest}`:''),
+              priority: iso(ev.date)===iso(now) ? 'urgente' : 'normal',
+              type:'preventivo', status:'pendiente', assignee:'Ricardo',
+              dueDate: iso(ev.date),
+            };
+            const r = await authFetch('/tasks',{method:'POST',body:JSON.stringify(payload)});
+            return r.ok;
+          };
+          const crearUna = async (ev) => {
+            setVerifBusy(titleFor(ev)+iso(ev.date));
+            await crear(ev);
+            await reloadTasks();
+            setVerifBusy('');
+          };
+          const crearTodas = async () => {
+            setVerifBusy('all');
+            for (const ev of pendientes) await crear(ev);
+            await reloadTasks();
+            setVerifBusy('');
+          };
+          const fmtEv = d => d.toLocaleDateString('es',{weekday:'short',day:'numeric',month:'short'});
+
+          return (
+            <div>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                <div className="dash-section-title" style={{marginBottom:0}}>🔎 Verificaciones próximas</div>
+                {pendientes.length>1&&(
+                  <button onClick={crearTodas} disabled={!!verifBusy}
+                    style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:800,cursor:'pointer'}}>
+                    {verifBusy==='all'?'Creando...':`Crear todas (${pendientes.length})`}
+                  </button>
+                )}
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                {eventos.map((ev,i)=>{
+                  const existe = yaExiste(ev);
+                  const busy = verifBusy===titleFor(ev)+iso(ev.date);
+                  return (
+                    <div key={i} style={{display:'flex',alignItems:'center',gap:9,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 11px',opacity:existe?.55:1}}>
+                      <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'3px 8px',borderRadius:6,flexShrink:0,letterSpacing:.3}}>{uname(ev.unitId)}</span>
+                      <div style={{flex:1,minWidth:0}}>
+                        <span style={{fontSize:11,fontWeight:700,color:ev.tipo==='entrada'?'var(--done)':'var(--urgent)'}}>{ev.tipo==='entrada'?'→ Entrada':'← Salida'}</span>
+                        <span style={{fontSize:10,color:'var(--muted)'}}> · {fmtEv(ev.date)}{ev.guest?` · ${String(ev.guest).slice(0,18)}`:''}</span>
+                      </div>
+                      {existe?(
+                        <span style={{fontSize:9,fontWeight:700,color:'var(--done)',flexShrink:0}}>✓ Creada</span>
+                      ):(
+                        <button onClick={()=>crearUna(ev)} disabled={!!verifBusy}
+                          style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',borderRadius:7,padding:'4px 9px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>
+                          {busy?'...':'+ Crear'}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* VENCIDAS */}
         {vencidas.length>0&&(
