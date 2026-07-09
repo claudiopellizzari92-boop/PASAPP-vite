@@ -4258,6 +4258,8 @@ function ReservationsScreen() {
                       return true;
                     }).sort((a,b)=>b.date.localeCompare(a.date));
                     const totalExp = filtExp.reduce((s,e)=>s+e.amount,0);
+                    const prestamoExp = filtExp.filter(e=>e.category==='préstamo').reduce((s,e)=>s+e.amount,0);
+                    const gastosOp = totalExp - prestamoExp;
 
                     // Ingresos COBRADOS: las reservas se cobran el mes siguiente al checkout,
                     // así que el mes actual (y futuros) del año en curso todavía no se cobraron.
@@ -4272,7 +4274,8 @@ function ReservationsScreen() {
                               .reduce((s,r)=>s+parseIncome(r.income),0)
                           : totalIncome);
                     const hayPendiente = cobradoIncome !== totalIncome;
-                    const neto = cobradoIncome - totalExp;
+                    const neto = cobradoIncome - gastosOp;       // neto OPERATIVO (sin préstamo)
+                    const flujo = cobradoIncome - totalExp;      // flujo de caja (con préstamo)
 
                     const saveExp = async () => {
                       if (!expF.concept.trim() || !expF.amount) return;
@@ -4351,14 +4354,21 @@ function ReservationsScreen() {
                             {hayPendiente&&<div style={{fontSize:8,color:'var(--muted)',marginTop:2}}>de {fmtMoney(totalIncome)} total</div>}
                           </div>
                           <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
-                            <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:'var(--urgent)'}}>−{fmtMoney2(totalExp)}</div>
-                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Gastos</div>
+                            <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:'var(--urgent)'}}>−{fmtMoney2(gastosOp)}</div>
+                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Gastos operativos</div>
                           </div>
                           <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 8px',textAlign:'center'}}>
                             <div style={{fontSize:15,fontWeight:800,fontFamily:'var(--serif)',color:neto>=0?'var(--gold)':'var(--urgent)'}}>{fmtMoney2(neto)}</div>
-                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Neto{hayPendiente?' cobrado':''}</div>
+                            <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Neto operativo{hayPendiente?' (cobrado)':''}</div>
                           </div>
                         </div>
+                        {prestamoExp!==0&&(
+                          <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 12px',marginBottom:hayPendiente?4:10,flexWrap:'wrap'}}>
+                            <span style={{fontSize:10,color:'var(--muted)'}}>🏦 Préstamo: <strong style={{color:'var(--urgent)'}}>−{fmtMoney2(prestamoExp)}</strong></span>
+                            <span style={{fontSize:10,color:'var(--muted)'}}>→</span>
+                            <span style={{fontSize:10,color:'var(--muted)'}}>Flujo de caja: <strong style={{color:flujo>=0?'var(--done)':'var(--urgent)',fontSize:12}}>{fmtMoney2(flujo)}</strong></span>
+                          </div>
+                        )}
                         {hayPendiente&&(
                           <div style={{fontSize:9,color:'var(--muted)',textAlign:'center',marginBottom:10,fontStyle:'italic'}}>
                             Los ingresos se cobran el mes siguiente al checkout · {incMonth!==null?'este mes aún no cobrado':`meses desde ${MONTHS[mesActual]} aún no cobrados`}
