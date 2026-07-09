@@ -938,6 +938,7 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
   const [t, setT] = useState(task);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
+  const [editTitle, setEditTitle] = useState(null); // null = no editando; string = valor en edición
   const [lightbox, setLightbox] = useState(null);
   const [photoUploading, setPhotoUploading] = useState(null); // 'start' | 'complete' | null
   const [notePhoto, setNotePhoto] = useState(null); // base64 photo attached to note
@@ -1002,7 +1003,21 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
             </div>
             <button className="dm-close" onClick={onClose}><Ic d={D.x} sz={13}/></button>
           </div>
-          <div className="dm-title">{t.title}</div>
+          {editTitle===null?(
+            <div className="dm-title" onClick={()=>setEditTitle(t.title)} style={{cursor:'pointer'}} title="Tocar para editar el título">
+              {t.title} <span style={{fontSize:12,color:'var(--muted)'}}>✎</span>
+            </div>
+          ):(
+            <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:4}}>
+              <input className="minp" value={editTitle} onChange={e=>setEditTitle(e.target.value)} autoFocus
+                onKeyDown={e=>{if(e.key==='Enter'&&editTitle.trim()){upd({title:editTitle.trim()});setEditTitle(null);}if(e.key==='Escape')setEditTitle(null);}}
+                style={{flex:1,fontSize:14,fontWeight:700}}/>
+              <button onClick={()=>{if(editTitle.trim()){upd({title:editTitle.trim()});setEditTitle(null);}}} disabled={busy||!editTitle.trim()}
+                style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'8px 12px',fontSize:11,fontWeight:800,cursor:'pointer',flexShrink:0}}>✓</button>
+              <button onClick={()=>setEditTitle(null)}
+                style={{background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 10px',fontSize:11,fontWeight:700,cursor:'pointer',flexShrink:0}}>×</button>
+            </div>
+          )}
           {t.description&&<div className="dm-desc">{t.description}</div>}
           <div className="dm-badges">
             <div className="dm-badge" style={{color:sc,background:sbg,borderColor:sborder}}>
