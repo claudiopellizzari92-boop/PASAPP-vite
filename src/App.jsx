@@ -3093,6 +3093,7 @@ function DashboardScreen({ onNavigate }) {
   const tasks = allTasks || [];
   const now = new Date();
   const [verifBusy, setVerifBusy] = useState('');
+  const [verifOpenDay, setVerifOpenDay] = useState({});
 
   // ── Occupancy calculations ────────────────────────────────────
   const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101); // exclude Recepcion/Areas Comunes
@@ -3232,13 +3233,22 @@ function DashboardScreen({ onNavigate }) {
           const in7 = new Date(now.getFullYear(),now.getMonth(),now.getDate()+7);
           const hoy0 = new Date(now.getFullYear(),now.getMonth(),now.getDate());
           const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-          const eventos = [];
+          // Recolectar eventos y fusionar salida+entrada del mismo día en "cambio"
+          const evMap = {};
           reservations.forEach(r=>{
-            if (r.checkOut>=hoy0 && r.checkOut<=in7) eventos.push({tipo:'salida', date:r.checkOut, unitId:r.unitId, guest:r.guest});
-            if (r.checkIn >=hoy0 && r.checkIn <=in7) eventos.push({tipo:'entrada', date:r.checkIn, unitId:r.unitId, guest:r.guest});
+            if (r.checkOut>=hoy0 && r.checkOut<=in7) {
+              const k = `${iso(r.checkOut)}_${r.unitId}`;
+              evMap[k] = {...(evMap[k]||{}), date:r.checkOut, unitId:r.unitId, salida:true, guestOut:r.guest};
+            }
+            if (r.checkIn >=hoy0 && r.checkIn <=in7) {
+              const k = `${iso(r.checkIn)}_${r.unitId}`;
+              evMap[k] = {...(evMap[k]||{}), date:r.checkIn, unitId:r.unitId, entrada:true, guestIn:r.guest};
+            }
           });
+          const eventos = Object.values(evMap).map(e=>({
+            ...e, tipo: e.salida&&e.entrada ? 'cambio' : (e.salida?'salida':'entrada')
+          })).sort((a,b)=>a.date-b.date || a.unitId-b.unitId);
           if (eventos.length===0) return null;
-          eventos.sort((a,b)=>a.date-b.date);
 
           const titleFor = ev => `Verificación ${ev.tipo} · ${uname(ev.unitId)}`;
           const yaExiste = ev => tasks.some(t=>t.title===titleFor(ev) && String(t.dueDate||'').slice(0,10)===iso(ev.date));
@@ -3246,12 +3256,15 @@ function DashboardScreen({ onNavigate }) {
 
           const CHECK_ENTRADA = 'Verificar que el equipo de limpieza dejó la unidad lista para el huésped:\n☐ Limpieza general (pisos, superficies, cocina)\n☐ Baños impecables\n☐ Sábanas y toallas completas y limpias\n☐ A/C funcionando\n☐ Agua caliente\n☐ Electrodomésticos operativos\n☐ Inventario completo (controles, secador, utensilios)\n☐ Sin daños visibles ni olores\n\nSi algo falla: foto + reportar a la compañía de rentas.';
           const CHECK_SALIDA  = 'Inspeccionar la unidad tras la salida del huésped:\n☐ Daños o faltantes causados por el huésped\n☐ Objetos olvidados\n☐ Estado de electrodomésticos y A/C\n☐ Novedades para reportar a la compañía de rentas\n\nRegistrar con fotos si hay algo anormal.';
+          const CHECK_CAMBIO  = 'Cambio de huésped (salida + entrada el mismo día). Verificar tras la limpieza:\n\nSALIDA:\n☐ Daños o faltantes causados por el huésped\n☐ Objetos olvidados\n\nENTRADA:\n☐ Limpieza general y baños impecables\n☐ Sábanas y toallas completas\n☐ A/C y agua caliente funcionando\n☐ Electrodomésticos e inventario completos\n☐ Sin daños visibles ni olores\n\nSi algo falla: foto + reportar a la compañía de rentas.';
 
           const crear = async (ev) => {
+            const desc = ev.tipo==='cambio'?CHECK_CAMBIO:(ev.tipo==='entrada'?CHECK_ENTRADA:CHECK_SALIDA);
+            const guests = [ev.guestOut&&`Sale: ${ev.guestOut}`, ev.guestIn&&`Entra: ${ev.guestIn}`].filter(Boolean).join(' · ');
             const payload = {
               unitId: Number(ev.unitId), level:'N1', category:'mantenimiento',
               title: titleFor(ev),
-              description: (ev.tipo==='entrada'?CHECK_ENTRADA:CHECK_SALIDA) + (ev.guest?`\n\nReserva: ${ev.guest}`:''),
+              description: desc + (guests?`\n\n${guests}`:''),
               priority: iso(ev.date)===iso(now) ? 'urgente' : 'normal',
               type:'preventivo', status:'pendiente', assignee:'Ricardo',
               dueDate: iso(ev.date),
@@ -3259,54 +3272,81 @@ function DashboardScreen({ onNavigate }) {
             const r = await authFetch('/tasks',{method:'POST',body:JSON.stringify(payload)});
             return r.ok;
           };
-          const crearUna = async (ev) => {
-            setVerifBusy(titleFor(ev)+iso(ev.date));
-            await crear(ev);
+          const crearVarias = async (list, busyKey) => {
+            setVerifBusy(busyKey);
+            for (const ev of list) await crear(ev);
             await reloadTasks();
             setVerifBusy('');
           };
-          const crearTodas = async () => {
-            setVerifBusy('all');
-            for (const ev of pendientes) await crear(ev);
-            await reloadTasks();
-            setVerifBusy('');
-          };
-          const fmtEv = d => d.toLocaleDateString('es',{weekday:'short',day:'numeric',month:'short'});
+
+          // Agrupar por día
+          const dias = {};
+          eventos.forEach(ev=>{ const k=iso(ev.date); if(!dias[k])dias[k]=[]; dias[k].push(ev); });
+          const diaKeys = Object.keys(dias).sort();
+          const hoyIso = iso(now);
+          const mananaIso = iso(new Date(now.getFullYear(),now.getMonth(),now.getDate()+1));
+          const fmtDia = k => { const d=new Date(k+'T12:00:00'); const lbl=d.toLocaleDateString('es',{weekday:'long',day:'numeric',month:'short'}); return k===hoyIso?`HOY · ${lbl}`:k===mananaIso?`MAÑANA · ${lbl}`:lbl; };
+          const tipoUi = {salida:{ico:'←',lbl:'Salida',col:'var(--urgent)'},entrada:{ico:'→',lbl:'Entrada',col:'var(--done)'},cambio:{ico:'↔',lbl:'Cambio',col:'var(--gold)'}};
 
           return (
             <div>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
                 <div className="dash-section-title" style={{marginBottom:0}}>🔎 Verificaciones próximas</div>
                 {pendientes.length>1&&(
-                  <button onClick={crearTodas} disabled={!!verifBusy}
+                  <button onClick={()=>crearVarias(pendientes,'all')} disabled={!!verifBusy}
                     style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:800,cursor:'pointer'}}>
                     {verifBusy==='all'?'Creando...':`Crear todas (${pendientes.length})`}
                   </button>
                 )}
               </div>
-              <div style={{display:'flex',flexDirection:'column',gap:5}}>
-                {eventos.map((ev,i)=>{
-                  const existe = yaExiste(ev);
-                  const busy = verifBusy===titleFor(ev)+iso(ev.date);
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {diaKeys.map(dk=>{
+                  const evs = dias[dk];
+                  const pend = evs.filter(ev=>!yaExiste(ev));
+                  const abierto = verifOpenDay[dk] ?? (dk===hoyIso||dk===mananaIso);
                   return (
-                    <div key={i} style={{display:'flex',alignItems:'center',gap:9,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 11px',opacity:existe?.55:1}}>
-                      <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'3px 8px',borderRadius:6,flexShrink:0,letterSpacing:.3}}>{uname(ev.unitId)}</span>
-                      <div style={{flex:1,minWidth:0}}>
-                        <span style={{fontSize:11,fontWeight:700,color:ev.tipo==='entrada'?'var(--done)':'var(--urgent)'}}>{ev.tipo==='entrada'?'→ Entrada':'← Salida'}</span>
-                        <span style={{fontSize:10,color:'var(--muted)'}}> · {fmtEv(ev.date)}{ev.guest?` · ${String(ev.guest).slice(0,18)}`:''}</span>
-                      </div>
-                      {existe?(
-                        <span style={{fontSize:9,fontWeight:700,color:'var(--done)',flexShrink:0}}>✓ Creada</span>
-                      ):(
-                        <button onClick={()=>crearUna(ev)} disabled={!!verifBusy}
-                          style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',borderRadius:7,padding:'4px 9px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>
-                          {busy?'...':'+ Crear'}
+                    <div key={dk} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:8,padding:'9px 12px',background:dk===hoyIso?'rgba(201,150,58,.08)':'transparent'}}>
+                        <button onClick={()=>setVerifOpenDay(p=>({...p,[dk]:!abierto}))}
+                          style={{flex:1,display:'flex',alignItems:'center',gap:8,background:'none',border:'none',cursor:'pointer',textAlign:'left',padding:0}}>
+                          <span style={{fontSize:10,color:'var(--muted)',transition:'transform .15s',transform:abierto?'rotate(90deg)':'none'}}>▶</span>
+                          <span style={{fontSize:11,fontWeight:800,color:dk===hoyIso?'var(--gold)':'var(--text)',textTransform:'capitalize'}}>{fmtDia(dk)}</span>
+                          <span style={{fontSize:9,color:'var(--muted)'}}>{evs.length} unidad{evs.length!==1?'es':''}</span>
                         </button>
+                        {pend.length>0?(
+                          <button onClick={()=>crearVarias(pend,dk)} disabled={!!verifBusy}
+                            style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',borderRadius:7,padding:'3px 9px',fontSize:9,fontWeight:800,cursor:'pointer',flexShrink:0}}>
+                            {verifBusy===dk?'...':`Crear ${pend.length}`}
+                          </button>
+                        ):(
+                          <span style={{fontSize:9,fontWeight:700,color:'var(--done)',flexShrink:0}}>✓ Listas</span>
+                        )}
+                      </div>
+                      {abierto&&(
+                        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:6,padding:'0 10px 10px'}}>
+                          {evs.map((ev,i)=>{
+                            const existe = yaExiste(ev);
+                            const ui = tipoUi[ev.tipo];
+                            const g = ev.guestIn||ev.guestOut||'';
+                            return (
+                              <div key={i} onClick={()=>!existe&&!verifBusy&&crearVarias([ev],titleFor(ev)+iso(ev.date))}
+                                style={{display:'flex',alignItems:'center',gap:7,background:'var(--bg)',border:'1px solid var(--border)',borderRadius:9,padding:'7px 9px',opacity:existe?.5:1,cursor:existe?'default':'pointer'}}>
+                                <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',padding:'2px 7px',borderRadius:5,flexShrink:0}}>{uname(ev.unitId)}</span>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <span style={{fontSize:10,fontWeight:800,color:ui.col}}>{ui.ico} {ui.lbl}</span>
+                                  {g&&<div style={{fontSize:8,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{g}</div>}
+                                </div>
+                                <span style={{fontSize:existe?9:13,fontWeight:800,color:existe?'var(--done)':'var(--gold)',flexShrink:0}}>{existe?'✓':(verifBusy===titleFor(ev)+iso(ev.date)?'·':'+')}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   );
                 })}
               </div>
+              <div style={{fontSize:9,color:'var(--muted)',marginTop:6,fontStyle:'italic'}}>Tocá una unidad para crear su verificación (asignada a Ricardo) · ↔ Cambio = salida y entrada el mismo día, una sola visita.</div>
             </div>
           );
         })()}
