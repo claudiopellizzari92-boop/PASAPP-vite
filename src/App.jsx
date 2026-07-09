@@ -220,6 +220,40 @@ function AuthProvider({ children }) {
     } catch(e) { return { ok:false }; }
   }, [token]);
 
+  // ── Plantillas de mantenimiento preventivo ──
+  const [maintTemplates, setMaintTemplates] = useState([]);
+  const fetchMaintTemplates = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await fetch(`${API}/maint-templates`, { headers:{ Authorization:`Bearer ${token}` } });
+      if (!r.ok) { setMaintTemplates(r.status===404?null:[]); return; }
+      const rows = await r.json();
+      setMaintTemplates(rows.map(t=>({
+        id:t.id, title:t.title, description:t.description||'', category:t.category||'mantenimiento',
+        intervalDays:t.interval_days, assignee:t.assignee||'', unitIds:t.unit_ids||[], active:t.active!==false,
+      })));
+    } catch(e) { setMaintTemplates(null); }
+  }, [token]);
+  const saveMaintTemplate = useCallback(async (tpl) => {
+    if (!token) return { ok:false };
+    try {
+      const isEdit = !!tpl.id;
+      const r = await fetch(`${API}/maint-templates${isEdit?'/'+tpl.id:''}`, {
+        method: isEdit?'PATCH':'POST',
+        headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${token}` },
+        body: JSON.stringify(tpl)
+      });
+      return { ok: r.ok };
+    } catch(e) { return { ok:false }; }
+  }, [token]);
+  const deleteMaintTemplate = useCallback(async (id) => {
+    if (!token) return { ok:false };
+    try {
+      const r = await fetch(`${API}/maint-templates/${id}`, { method:'DELETE', headers:{ Authorization:`Bearer ${token}` } });
+      return { ok: r.ok || r.status===204 };
+    } catch(e) { return { ok:false }; }
+  }, [token]);
+
   const saveCancellations = useCallback(async (res) => {
     if (!token) return { ok:false, error:'No autenticado' };
     try {
@@ -335,7 +369,7 @@ function AuthProvider({ children }) {
     return () => { clearTimeout(t); evs.forEach(e => window.removeEventListener(e, reset, true)); };
   }, [user]);
 
-  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense,updateExpense,deleteExpensesRange}}, children);
+  return React.createElement(AuthCtx.Provider, {value:{user,token,loading,login,logout,authFetch,registerBiometric,loginBiometric,hasBiometric,tasks,measurements,tasksFetching,measFetching,fetchTasks,fetchMeasurements,reloadTasks,reloadMeasurements,setTasks,setMeasurements,loadDemoData,reservations,setReservations,saveReservations,cancellations,setCancellations,saveCancellations,expenses,fetchExpenses,addExpense,deleteExpense,updateExpense,deleteExpensesRange,maintTemplates,fetchMaintTemplates,saveMaintTemplate,deleteMaintTemplate}}, children);
 }
 
 /* CONSTANTS */
@@ -1754,10 +1788,12 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
 
 /* UNITS SCREEN */
 function UnitsScreen() {
-  const { user, authFetch, tasks:allTasks, fetchTasks, setTasks, reservations, setReservations, saveReservations, setCancellations, saveCancellations } = useAuth();
+  const { user, authFetch, tasks:allTasks, fetchTasks, setTasks, reservations, setReservations, saveReservations, setCancellations, saveCancellations, maintTemplates, fetchMaintTemplates, saveMaintTemplate, deleteMaintTemplate } = useAuth();
   const tasks = allTasks || [];
   const loading = allTasks === null;
   const isAdmin = user?.username === 'admin';
+  const [tplForm, setTplForm] = useState(null);   // plantilla en edición/creación
+  const [tplBusy, setTplBusy] = useState('');
   const [selU,      setSelU]      = useState(UNIT_IDS[0]);
   const [lvl,       setLvl]       = useState('all');
   const [editT,     setEditT]     = useState(null);
@@ -1767,7 +1803,7 @@ function UnitsScreen() {
   const [uTab,      setUTab]      = useState('tasks'); // 'tasks' | 'photos' | 'availability'
   const [lightbox,  setLightbox]  = useState(null);
 
-  useEffect(()=>{ fetchTasks(); },[]);
+  useEffect(()=>{ fetchTasks(); fetchMaintTemplates(); },[]);
   const reloadTasks = useCallback(()=>{ fetchTasks(true); },[fetchTasks]);
 
   const getAlert = uid => {
@@ -1985,7 +2021,7 @@ function UnitsScreen() {
 
           {/* Tabs: Tareas / Fotos / Disponibilidad */}
           <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginBottom:12}}>
-            {[['tasks','Tareas'],['photos','Fotos'],['availability','Reservas']].map(([id,lbl])=>(
+            {[['tasks','Tareas'],['photos','Fotos'],['availability','Reservas'],['preventivo','Preventivo']].map(([id,lbl])=>(
               <button key={id} onClick={()=>setUTab(id)} style={{
                 flex:1,padding:'8px 4px',fontSize:12,fontWeight:700,border:'none',background:'none',
                 color:uTab===id?'var(--gold)':'var(--muted)',cursor:'pointer',
@@ -2007,7 +2043,181 @@ function UnitsScreen() {
             })}
           </div>}
 
-          {uTab==='availability'?(
+          {uTab==='preventivo'?(()=>{
+            if (maintTemplates===null) return (
+              <div style={{fontSize:11,color:'var(--muted)',background:'var(--surface)',border:'1px dashed var(--border)',borderRadius:10,padding:'12px'}}>
+                El mantenimiento preventivo requiere actualizar el backend (tabla maint_templates + endpoints).
+              </div>
+            );
+            const dayMs=86400000;
+            const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            const hoy = new Date();
+            const doneDate = t => {
+              const h=(t.history||[]).filter(x=>/completado/i.test(x.action||'')).map(x=>x.date).sort();
+              return h.length?h[h.length-1]:t.createdAt;
+            };
+            // Plantillas que aplican a la unidad seleccionada
+            const tpls = (maintTemplates||[]).filter(t=>t.active&&t.unitIds.includes(selU));
+            const estado = tpl => {
+              // Última vez que se completó esta plantilla en esta unidad
+              const hechas = tasks.filter(t=>t.unitId===selU&&t.status==='completado'&&t.title===tpl.title)
+                                  .map(t=>new Date(doneDate(t)).getTime()).filter(n=>isFinite(n)).sort((a,b)=>b-a);
+              const ultima = hechas[0]||null;
+              // ¿Ya hay una tarea abierta?
+              const abierta = tasks.find(t=>t.unitId===selU&&t.status!=='completado'&&t.title===tpl.title);
+              const proxima = ultima ? new Date(ultima + tpl.intervalDays*dayMs) : null;
+              const diasRest = proxima ? Math.ceil((proxima-hoy)/dayMs) : null;
+              return { ultima, abierta, proxima, diasRest, vencida: ultima ? diasRest<=0 : true };
+            };
+            const crearTarea = async (tpl) => {
+              setTplBusy('t'+tpl.id);
+              const payload = {
+                unitId:selU, level:'N1', category:tpl.category||'mantenimiento',
+                title:tpl.title, description:tpl.description||'',
+                priority:'programado', type:'preventivo', status:'pendiente',
+                assignee:tpl.assignee||'', dueDate:iso(hoy),
+              };
+              await authFetch('/tasks',{method:'POST',body:JSON.stringify(payload)});
+              await reloadTasks();
+              setTplBusy('');
+            };
+            const guardar = async () => {
+              if(!tplForm.title.trim()||!tplForm.intervalDays||tplForm.unitIds.length===0){alert('Faltan datos: título, intervalo y al menos una unidad.');return;}
+              setTplBusy('save');
+              const r = await saveMaintTemplate({...tplForm, intervalDays:Number(tplForm.intervalDays)});
+              setTplBusy('');
+              if(r.ok){ setTplForm(null); fetchMaintTemplates(); } else alert('No se pudo guardar.');
+            };
+            const borrar = async (id) => {
+              if(!confirm('¿Borrar esta plantilla? Las tareas ya creadas no se tocan.'))return;
+              const r = await deleteMaintTemplate(id);
+              if(r.ok) fetchMaintTemplates();
+            };
+            const fmtD = ms => new Date(ms).toLocaleDateString('es',{day:'numeric',month:'short',year:'2-digit'});
+
+            return (
+              <div style={{display:'flex',flexDirection:'column',gap:14}}>
+                {/* Estado de la unidad seleccionada */}
+                <div>
+                  <div className="dash-section-title" style={{marginBottom:8}}>🔄 Preventivo · {uname(selU)}</div>
+                  {tpls.length===0?(
+                    <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'10px 0'}}>Sin plantillas asignadas a esta unidad</div>
+                  ):(
+                    <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                      {tpls.map(tpl=>{
+                        const st = estado(tpl);
+                        const col = st.abierta?'var(--muted)':st.vencida?'var(--urgent)':(st.diasRest<=14?'var(--gold)':'var(--done)');
+                        const txt = st.abierta?'Tarea abierta'
+                          : !st.ultima?'Nunca realizado'
+                          : st.vencida?`Vencido hace ${Math.abs(st.diasRest)} días`
+                          : `En ${st.diasRest} días`;
+                        return (
+                          <div key={tpl.id} style={{background:'var(--surface)',border:'1px solid var(--border)',borderLeft:`3px solid ${col}`,borderRadius:10,padding:'9px 12px',display:'flex',alignItems:'center',gap:10}}>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:12,fontWeight:700,color:'var(--text)'}}>{tpl.title}</div>
+                              <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>
+                                cada {tpl.intervalDays} días{tpl.assignee?` · ${tpl.assignee}`:''}
+                                {st.ultima?` · última: ${fmtD(st.ultima)}`:''}
+                              </div>
+                            </div>
+                            <span style={{fontSize:9,fontWeight:800,color:col,flexShrink:0,textAlign:'right'}}>{txt}</span>
+                            {!st.abierta&&(st.vencida||st.diasRest<=14)&&(
+                              <button onClick={()=>crearTarea(tpl)} disabled={!!tplBusy}
+                                style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',borderRadius:7,padding:'4px 9px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>
+                                {tplBusy==='t'+tpl.id?'...':'+ Crear'}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Administrar plantillas (solo admin) */}
+                {isAdmin&&(
+                  <div>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                      <div className="dash-section-title" style={{marginBottom:0}}>Plantillas</div>
+                      <button onClick={()=>setTplForm({title:'',description:'',category:'mantenimiento',intervalDays:90,assignee:'',unitIds:[selU],active:true})}
+                        style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'5px 10px',fontSize:10,fontWeight:800,cursor:'pointer'}}>+ Plantilla</button>
+                    </div>
+                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                      {(maintTemplates||[]).map(tpl=>(
+                        <div key={tpl.id} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 11px',display:'flex',alignItems:'center',gap:9,opacity:tpl.active?1:.5}}>
+                          <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>setTplForm({...tpl})}>
+                            <div style={{fontSize:11,fontWeight:700,color:'var(--text)'}}>{tpl.title} ✎</div>
+                            <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>cada {tpl.intervalDays} días · {tpl.unitIds.length} unidad{tpl.unitIds.length!==1?'es':''}{tpl.assignee?` · ${tpl.assignee}`:''}</div>
+                          </div>
+                          <button onClick={()=>borrar(tpl.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px'}}>×</button>
+                        </div>
+                      ))}
+                      {(maintTemplates||[]).length===0&&<div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'8px 0'}}>Sin plantillas. Creá la primera con "+ Plantilla".</div>}
+                    </div>
+                  </div>
+                )}
+
+                {/* Modal de plantilla */}
+                {tplForm&&(
+                  <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&setTplForm(null)}>
+                    <div style={{background:'var(--surface)',borderRadius:14,padding:'18px 16px',maxWidth:400,width:'94%',maxHeight:'85vh',overflowY:'auto'}} className="hide-scroll">
+                      <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:12}}>{tplForm.id?'Editar':'Nueva'} plantilla</div>
+                      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                        <input className="minp" value={tplForm.title} onChange={e=>setTplForm(p=>({...p,title:e.target.value}))} placeholder="Título (ej: Cambio de filtros A/C)"/>
+                        <textarea className="minp" rows={3} value={tplForm.description} onChange={e=>setTplForm(p=>({...p,description:e.target.value}))} placeholder="Instrucciones / checklist" style={{resize:'vertical',fontFamily:'inherit'}}/>
+                        <div style={{display:'flex',gap:8}}>
+                          <div style={{flex:1}}>
+                            <label style={{fontSize:9,color:'var(--muted)',fontWeight:700,textTransform:'uppercase'}}>Cada (días)</label>
+                            <input className="minp" type="number" value={tplForm.intervalDays} onChange={e=>setTplForm(p=>({...p,intervalDays:e.target.value}))}/>
+                          </div>
+                          <div style={{flex:1}}>
+                            <label style={{fontSize:9,color:'var(--muted)',fontWeight:700,textTransform:'uppercase'}}>Categoría</label>
+                            <select className="minp msel" value={tplForm.category} onChange={e=>setTplForm(p=>({...p,category:e.target.value}))}>
+                              {['mantenimiento','plomería','electricidad','aires','limpieza','pintura','cerrajería'].map(c=><option key={c} value={c}>{c}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                        <input className="minp" value={tplForm.assignee} onChange={e=>setTplForm(p=>({...p,assignee:e.target.value}))} placeholder="Asignado a (ej: Toro)"/>
+                        <div>
+                          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:5}}>
+                            <label style={{fontSize:9,color:'var(--muted)',fontWeight:700,textTransform:'uppercase'}}>Unidades ({tplForm.unitIds.length})</label>
+                            <div style={{display:'flex',gap:5}}>
+                              <button onClick={()=>setTplForm(p=>({...p,unitIds:[...UNIT_IDS]}))} style={{fontSize:9,fontWeight:700,padding:'3px 7px',borderRadius:6,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Todas</button>
+                              <button onClick={()=>setTplForm(p=>({...p,unitIds:[]}))} style={{fontSize:9,fontWeight:700,padding:'3px 7px',borderRadius:6,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Ninguna</button>
+                            </div>
+                          </div>
+                          <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                            {UNIT_IDS.map(uid=>{
+                              const on = tplForm.unitIds.includes(uid);
+                              return (
+                                <button key={uid} onClick={()=>setTplForm(p=>({...p,unitIds:on?p.unitIds.filter(x=>x!==uid):[...p.unitIds,uid]}))}
+                                  style={{fontSize:9,fontWeight:800,padding:'4px 8px',borderRadius:6,cursor:'pointer',
+                                    border:`1px solid ${on?'var(--gold)':'var(--border)'}`,
+                                    background:on?'rgba(201,150,58,.12)':'var(--bg)',
+                                    color:on?'var(--gold)':'var(--muted)'}}>{uname(uid)}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        {tplForm.id&&(
+                          <label style={{display:'flex',alignItems:'center',gap:7,fontSize:11,color:'var(--muted)',cursor:'pointer'}}>
+                            <input type="checkbox" checked={tplForm.active} onChange={e=>setTplForm(p=>({...p,active:e.target.checked}))} style={{accentColor:'#c9963a'}}/>
+                            Plantilla activa
+                          </label>
+                        )}
+                        <div style={{display:'flex',gap:8,marginTop:4}}>
+                          <button onClick={()=>setTplForm(null)} style={{flex:1,background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:9,padding:'11px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Cancelar</button>
+                          <button onClick={guardar} disabled={tplBusy==='save'} style={{flex:2,background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:9,padding:'11px',fontWeight:800,fontSize:13,cursor:'pointer'}}>
+                            {tplBusy==='save'?'Guardando...':'Guardar'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })():uTab==='availability'?(
             /* AVAILABILITY TAB */
             (()=>{
               const now = new Date();
