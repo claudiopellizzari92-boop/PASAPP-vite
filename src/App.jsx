@@ -1445,11 +1445,85 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
         <div className="rcount">{filtered.length} tarea{filtered.length!==1?'s':''} activa{filtered.length!==1?'s':''}</div>
 
         {loading ? <div className="spinner"/> : filtered.length===0 ? (
-          <div className="empty">
-            <div className="empty-icon"><Ic d={D.check} sz={22} col="var(--done)"/></div>
-            <div className="empty-t">{search?'Sin resultados':'Todo al día'}</div>
-            <div className="empty-s">{search?`No hay tareas que coincidan con "${search}"`:'No hay tareas activas pendientes.'}</div>
-          </div>
+          search ? (
+            <div className="empty">
+              <div className="empty-icon"><Ic d={D.check} sz={22} col="var(--done)"/></div>
+              <div className="empty-t">Sin resultados</div>
+              <div className="empty-s">{`No hay tareas que coincidan con "${search}"`}</div>
+            </div>
+          ) : (()=>{
+            const dayMs = 86400000;
+            const daysAgo = d => Math.floor((Date.now()-new Date(d).getTime())/dayMs);
+            const lastActivity = t => {
+              const hs = (t.history||[]).map(h=>h.date).filter(Boolean).sort();
+              return hs.length ? hs[hs.length-1] : t.createdAt;
+            };
+            // Unidades sin actividad reciente (>60 días sin ninguna tarea)
+            const UMBRAL = 60;
+            const inactivas = UNIT_IDS.map(uid=>{
+              const ts = tasks.filter(t=>t.unitId===uid);
+              if (ts.length===0) return { uid, dias:null };
+              const last = ts.map(lastActivity).sort();
+              return { uid, dias: daysAgo(last[last.length-1]) };
+            }).filter(x=>x.dias===null||x.dias>UMBRAL)
+              .sort((a,b)=>(b.dias??9999)-(a.dias??9999));
+            // Últimas completadas
+            const doneDate = t => {
+              const h = (t.history||[]).filter(x=>/completado/i.test(x.action||'')).map(x=>x.date).sort();
+              return h.length ? h[h.length-1] : lastActivity(t);
+            };
+            const completadas = tasks.filter(t=>t.status==='completado')
+              .map(t=>({...t,_done:doneDate(t)}))
+              .sort((a,b)=>String(b._done).localeCompare(String(a._done)))
+              .slice(0,12);
+            const fmtD = d => { try { return new Date(d).toLocaleDateString('es',{day:'numeric',month:'short'}); } catch(e){ return String(d).slice(0,10); } };
+
+            return (
+              <div style={{display:'flex',flexDirection:'column',gap:16,paddingBottom:20}}>
+                <div className="empty" style={{padding:'18px 0 4px'}}>
+                  <div className="empty-icon"><Ic d={D.check} sz={22} col="var(--done)"/></div>
+                  <div className="empty-t">Todo al día</div>
+                  <div className="empty-s">No hay tareas activas pendientes.</div>
+                </div>
+
+                {/* Unidades sin actividad reciente */}
+                {inactivas.length>0&&(
+                  <div>
+                    <div className="dash-section-title" style={{marginBottom:8}}>👁 Sin actividad reciente</div>
+                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                      {inactivas.map(x=>(
+                        <div key={x.uid} style={{display:'flex',alignItems:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'9px 12px'}}>
+                          <span style={{flex:1,fontSize:12,fontWeight:700,color:'var(--gold)'}}>{uname(x.uid)}</span>
+                          <span style={{fontSize:10,color:'var(--muted)'}}>
+                            {x.dias===null?'sin tareas registradas':`última tarea hace ${x.dias} días`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{fontSize:9,color:'var(--muted)',marginTop:6,fontStyle:'italic'}}>Unidades sin tareas en los últimos {UMBRAL} días — quizás merezcan una inspección.</div>
+                  </div>
+                )}
+
+                {/* Historial de completadas */}
+                {completadas.length>0&&(
+                  <div>
+                    <div className="dash-section-title" style={{marginBottom:8}}>✔ Últimas completadas</div>
+                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                      {completadas.map(t=>(
+                        <div key={t.id} onClick={()=>setSel(t)} style={{display:'flex',alignItems:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'9px 12px',cursor:'pointer',opacity:.85}}>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:12,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.title}</div>
+                            <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>{uname(t.unitId)}{t.assignee?` · ${t.assignee}`:''} · {fmtD(t._done)}</div>
+                          </div>
+                          <Ic d={D.check} sz={14} col="var(--done)"/>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()
         ) : (
           <div className="tlist">
             {filtered.map(task=>{
