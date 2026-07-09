@@ -2058,13 +2058,14 @@ function UnitsScreen() {
             };
             // Plantillas que aplican a la unidad seleccionada
             const tpls = (maintTemplates||[]).filter(t=>t.active&&t.unitIds.includes(selU));
+            const norm = s => String(s||'').toLowerCase().replace(/\s+/g,' ').trim();
             const estado = tpl => {
-              // Última vez que se completó esta plantilla en esta unidad
-              const hechas = tasks.filter(t=>t.unitId===selU&&t.status==='completado'&&t.title===tpl.title)
+              // Última vez que se completó esta plantilla en esta unidad (título normalizado)
+              const hechas = tasks.filter(t=>t.unitId===selU&&t.status==='completado'&&norm(t.title)===norm(tpl.title))
                                   .map(t=>new Date(doneDate(t)).getTime()).filter(n=>isFinite(n)).sort((a,b)=>b-a);
               const ultima = hechas[0]||null;
               // ¿Ya hay una tarea abierta?
-              const abierta = tasks.find(t=>t.unitId===selU&&t.status!=='completado'&&t.title===tpl.title);
+              const abierta = tasks.find(t=>t.unitId===selU&&t.status!=='completado'&&norm(t.title)===norm(tpl.title));
               const proxima = ultima ? new Date(ultima + tpl.intervalDays*dayMs) : null;
               const diasRest = proxima ? Math.ceil((proxima-hoy)/dayMs) : null;
               return { ultima, abierta, proxima, diasRest, vencida: ultima ? diasRest<=0 : true };
