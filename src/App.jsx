@@ -1176,6 +1176,7 @@ function TasksScreen({ isDark, onThemeToggle }) {
   const { user, authFetch, logout, tasks:allTasks, tasksFetching, fetchTasks, reloadTasks, setTasks } = useAuth();
   const tasks = allTasks || [];
   const loading = allTasks === null;
+  const now = new Date();
   const isAdmin = user?.username === 'admin';
   const [statusF,  setStatusF]  = useState('all');
   const [prioF,    setPrioF]    = useState('all');
@@ -1183,6 +1184,7 @@ function TasksScreen({ isDark, onThemeToggle }) {
   const [showNew,  setShowNew]  = useState(false);
   const [sel,      setSel]      = useState(null);
   const [assigneeF,setAssigneeF]= useState('all');
+  const [showStats, setShowStats] = useState(false);
 
   useEffect(() => { fetchTasks(); }, []);
 
@@ -1431,6 +1433,7 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
             {[['all','·'],['urgente','U'],['normal','N'],['programado','P']].map(([id,lbl])=>(
               <button key={id} className={`fchip ${prioF===id?(id==='all'?'on':id==='urgente'?'on-u':id==='normal'?'on-n':'on-p'):''}`} onClick={()=>setPrioF(id)}>{lbl}</button>
             ))}
+            <button className="fchip" onClick={()=>setShowStats(true)} style={{marginLeft:'auto'}} title="Estadísticas">📊</button>
           </div>
           {assignees.length>0&&<div className="frow" style={{marginTop:4}}>
             <span className="flbl">&#128100;</span>
@@ -1587,6 +1590,104 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
       </button>
       {showNew&&<NewTaskModal onClose={()=>setShowNew(false)} onSaved={()=>{setShowNew(false);reloadTasks();}}/>}
       {sel&&<TaskDetailModal task={sel} onClose={()=>setSel(null)} onUpdated={()=>{setSel(null);reloadTasks();}}/>}
+      {showStats&&(()=>{
+        const doneDate = t => {
+          const h = (t.history||[]).filter(x=>/completado/i.test(x.action||'')).map(x=>x.date).sort();
+          return h.length ? h[h.length-1] : t.createdAt;
+        };
+        const done = tasks.filter(t=>t.status==='completado');
+        // Completadas por mes (últimos 6 meses)
+        const meses = [];
+        for (let i=5;i>=0;i--) {
+          const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+          const k = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+          meses.push({ k, lbl: d.toLocaleDateString('es',{month:'short'}), n: done.filter(t=>String(doneDate(t)).slice(0,7)===k).length });
+        }
+        const maxMes = Math.max(1,...meses.map(m=>m.n));
+        // Por técnico
+        const techs = {};
+        tasks.forEach(t=>{ const a=t.assignee||'(sin asignar)'; if(!techs[a])techs[a]={done:0,activas:0}; t.status==='completado'?techs[a].done++:techs[a].activas++; });
+        const techList = Object.entries(techs).sort((a,b)=>b[1].done-a[1].done);
+        // Por unidad (top 8, todas las tareas)
+        const porU = {};
+        tasks.forEach(t=>{ porU[t.unitId]=(porU[t.unitId]||0)+1; });
+        const uniList = Object.entries(porU).sort((a,b)=>b[1]-a[1]).slice(0,8);
+        const maxU = Math.max(1,...uniList.map(([,n])=>n));
+        // Por categoría
+        const cats = {};
+        tasks.forEach(t=>{ const c=t.category||'otro'; cats[c]=(cats[c]||0)+1; });
+        const catList = Object.entries(cats).sort((a,b)=>b[1]-a[1]);
+        // Tiempo promedio de resolución
+        const dias = done.map(t=>{
+          const a=new Date(t.createdAt).getTime(), b=new Date(doneDate(t)).getTime();
+          return (b-a)/86400000;
+        }).filter(d=>isFinite(d)&&d>=0);
+        const avg = dias.length ? (dias.reduce((s,d)=>s+d,0)/dias.length) : null;
+
+        const barRow = (lbl, n, max, extra) => (
+          <div key={lbl} style={{display:'flex',alignItems:'center',gap:8,marginBottom:5}}>
+            <span style={{width:78,fontSize:10,fontWeight:700,color:'var(--gold)',flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{lbl}</span>
+            <div style={{flex:1,height:8,background:'var(--bg)',borderRadius:4,overflow:'hidden'}}>
+              <div style={{width:`${(n/max)*100}%`,height:'100%',background:'var(--gold)',borderRadius:4}}/>
+            </div>
+            <span style={{fontSize:10,fontWeight:800,color:'var(--text)',flexShrink:0,minWidth:24,textAlign:'right'}}>{n}</span>
+            {extra&&<span style={{fontSize:9,color:'var(--muted)',flexShrink:0}}>{extra}</span>}
+          </div>
+        );
+
+        return (
+          <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&setShowStats(false)}>
+            <div style={{background:'var(--surface)',borderRadius:14,padding:'18px 16px',maxWidth:420,width:'94%',maxHeight:'85vh',overflowY:'auto'}} className="hide-scroll">
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+                <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)'}}>📊 Estadísticas de mantenimiento</div>
+                <button onClick={()=>setShowStats(false)} style={{background:'none',border:'none',color:'var(--muted)',fontSize:18,cursor:'pointer'}}>×</button>
+              </div>
+
+              {/* KPIs superiores */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:16}}>
+                <div style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:10,padding:'10px',textAlign:'center'}}>
+                  <div style={{fontSize:18,fontWeight:800,fontFamily:'var(--serif)',color:'var(--done)'}}>{done.length}</div>
+                  <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,fontWeight:700,marginTop:2}}>Completadas total</div>
+                </div>
+                <div style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:10,padding:'10px',textAlign:'center'}}>
+                  <div style={{fontSize:18,fontWeight:800,fontFamily:'var(--serif)',color:'var(--gold)'}}>{avg!==null?avg.toFixed(1):'—'}</div>
+                  <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,fontWeight:700,marginTop:2}}>Días promedio de resolución</div>
+                </div>
+              </div>
+
+              {/* Completadas por mes */}
+              <div className="dash-section-title" style={{marginBottom:8}}>Completadas por mes</div>
+              <div style={{display:'flex',alignItems:'flex-end',gap:6,height:90,marginBottom:4}}>
+                {meses.map(m=>(
+                  <div key={m.k} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:3,height:'100%',justifyContent:'flex-end'}}>
+                    <span style={{fontSize:9,fontWeight:700,color:'var(--muted)'}}>{m.n||''}</span>
+                    <div style={{width:'100%',maxWidth:34,height:`${(m.n/maxMes)*62}px`,minHeight:m.n?3:0,background:'var(--done)',opacity:.75,borderRadius:'4px 4px 0 0'}}/>
+                    <span style={{fontSize:8,color:'var(--muted)',textTransform:'capitalize'}}>{m.lbl}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Por técnico */}
+              <div className="dash-section-title" style={{margin:'14px 0 8px'}}>Por técnico</div>
+              {techList.map(([a,v])=>barRow(a, v.done, Math.max(1,...techList.map(([,x])=>x.done)), v.activas?`+${v.activas} activas`:''))}
+
+              {/* Unidades con más tareas */}
+              <div className="dash-section-title" style={{margin:'14px 0 8px'}}>Unidades con más tareas</div>
+              {uniList.map(([u,n])=>barRow(uname(parseInt(u)), n, maxU))}
+
+              {/* Por categoría */}
+              <div className="dash-section-title" style={{margin:'14px 0 8px'}}>Por categoría</div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+                {catList.map(([c,n])=>(
+                  <span key={c} style={{fontSize:10,fontWeight:700,color:'var(--text)',background:'var(--bg)',border:'1px solid var(--border)',borderRadius:8,padding:'4px 10px'}}>
+                    {c} <strong style={{color:'var(--gold)'}}>{n}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* MONTHLY ARCHIVE PICKER */}
       {showArchivePicker&&(()=>{
