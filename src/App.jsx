@@ -1393,7 +1393,7 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
             <span>{user.displayName||user.username}</span>
             {isAdmin&&<button className="hbtn hbtn-g" onClick={exportCSV}><Ic d={D.dl} sz={14}/></button>}
             {isAdmin&&<button className="hbtn hbtn-g" title="Archivo mensual con fotos" onClick={()=>setShowArchivePicker(true)} style={{fontSize:13}}>📦</button>}
-            <BioRegisterBtn/>
+            <button className="hbtn hbtn-g" title="Estadísticas de mantenimiento" onClick={()=>setShowStats(true)} style={{fontSize:13}}>📊</button>
             <button className="hbtn" onClick={onThemeToggle} title="Cambiar tema" style={{fontSize:15}}>{isDark?'☀':'🌙'}</button>
             <button className="hbtn" onClick={logout}><Ic d={D.logout} sz={14}/></button>
           </div>
@@ -1433,7 +1433,6 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
             {[['all','·'],['urgente','U'],['normal','N'],['programado','P']].map(([id,lbl])=>(
               <button key={id} className={`fchip ${prioF===id?(id==='all'?'on':id==='urgente'?'on-u':id==='normal'?'on-n':'on-p'):''}`} onClick={()=>setPrioF(id)}>{lbl}</button>
             ))}
-            <button className="fchip" onClick={()=>setShowStats(true)} style={{marginLeft:'auto'}} title="Estadísticas">📊</button>
           </div>
           {assignees.length>0&&<div className="frow" style={{marginTop:4}}>
             <span className="flbl">&#128100;</span>
