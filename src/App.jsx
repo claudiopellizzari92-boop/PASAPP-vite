@@ -1923,7 +1923,7 @@ function UnitsScreen() {
     resU.forEach(r=>{
       const k = `${r.checkOut.getFullYear()}-${r.checkOut.getMonth()}`;
       if(!cell[k]) cell[k]={inc:0,nights:0,n:0,fut:0,futNights:0};
-      const fut = r.checkOut > today; // la estadía todavía no terminó → ingreso no realizado
+      const fut = r.checkIn > today; // la estadía todavía no empezó → ingreso no recibido
       if (fut) { cell[k].fut += parseInc(r.income); cell[k].futNights += nightsOf(r); }
       else     { cell[k].inc += parseInc(r.income); cell[k].nights  += nightsOf(r); cell[k].n++; }
     });
@@ -1960,8 +1960,8 @@ function UnitsScreen() {
     const occNow = occOf(yNow);
 
     // Forward bookings
-    // Forward bookings: estadías aún no completadas (mismo criterio que las celdas verdes)
-    const future = resU.filter(r=>r.checkOut>today).sort((a,b)=>a.checkIn-b.checkIn);
+    // Forward bookings: estadías que aún no comenzaron (mismo criterio que las celdas verdes)
+    const future = resU.filter(r=>r.checkIn>today).sort((a,b)=>a.checkIn-b.checkIn);
     const futTotal = future.reduce((s,r)=>s+parseInc(r.income),0);
     const futNights = future.reduce((s,r)=>s+nightsOf(r),0);
     const fmtD = d => d.toLocaleDateString('en-US',{day:'2-digit',month:'short',year:'numeric'});
@@ -2020,7 +2020,7 @@ function UnitsScreen() {
         </tbody>
       </table>
       <div class="note">Revenue is recognized in the month of guest check-out. Column headers state the period covered by each year.
-      Figures in <span style="color:${GRN};font-weight:700">green</span> are confirmed bookings whose stay has not yet been completed; they are not included in realized revenue, occupancy or ADR.</div>`;
+      Figures in <span style="color:${GRN};font-weight:700">green</span> are confirmed bookings that have not yet checked in; they are not included in realized revenue, occupancy or ADR.</div>`;
 
     const expenseTable = !withExpenses ? '' : `
       <div class="section-title">Operating expenses &amp; net operating income</div>
