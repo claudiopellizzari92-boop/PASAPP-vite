@@ -1853,7 +1853,7 @@ function UnitsScreen() {
   };
 
   // Informe financiero de la unidad: ingresos mes a mes + reservas futuras (para venta/inversores)
-  const exportUnitIncomePDF = () => {
+  const exportUnitIncomePDF = async () => {
     const name = uname(selU);
     const hoy = new Date(); hoy.setHours(0,0,0,0);
     const todayLbl = new Date().toLocaleDateString('es-VE',{year:'numeric',month:'long',day:'numeric'});
@@ -1865,8 +1865,23 @@ function UnitsScreen() {
     const resU = reservations.filter(r=>r.unitId===selU);
     if (resU.length===0) { alert('Esta unidad no tiene reservas registradas.'); return; }
 
+    // ¿Incluir gastos? (se traen frescos del servidor)
+    const incluirGastos = confirm('¿Incluir los GASTOS de la unidad en el informe?\n\nAceptar = con gastos y neto por año\nCancelar = solo ingresos');
+    let expU = [];
+    if (incluirGastos) {
+      try {
+        const r = await authFetch('/expenses');
+        if (r.ok) {
+          const rows = await r.json();
+          expU = rows.filter(x=>x.unit_id===selU).map(x=>({amount:x.amount, date:String(x.date).slice(0,10)}));
+        }
+      } catch(e) {}
+    }
+
     // Matriz ingresos por mes (asignados al mes del checkout) × año
-    const years = [...new Set(resU.map(r=>r.checkOut.getFullYear()))].sort();
+    const incYears = [...new Set(resU.map(r=>r.checkOut.getFullYear()))];
+    const expYears = [...new Set(expU.map(x=>parseInt(x.date.slice(0,4))))];
+    const years = [...new Set([...incYears, ...(incluirGastos?expYears:[])])].sort();
     const cell = {}; // `${y}-${m}` → {inc, noches, n}
     resU.forEach(r=>{
       const k = `${r.checkOut.getFullYear()}-${r.checkOut.getMonth()}`;
@@ -1877,6 +1892,15 @@ function UnitsScreen() {
     });
     const yearTotal = y => MESES.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).inc||0),0);
     const yearNights = y => MESES.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).noches||0),0);
+
+    // Matriz de gastos por mes × año
+    const gcell = {}; // `${y}-${m}` → total
+    expU.forEach(x=>{
+      const y = parseInt(x.date.slice(0,4)), m = parseInt(x.date.slice(5,7))-1;
+      const k = `${y}-${m}`;
+      gcell[k] = (gcell[k]||0) + x.amount;
+    });
+    const yearExp = y => MESES.reduce((s,_,m)=>s+(gcell[`${y}-${m}`]||0),0);
 
     // KPIs del año en curso
     const yNow = hoy.getFullYear();
@@ -1915,22 +1939,47 @@ function UnitsScreen() {
       ? '<div style="font-size:12px;color:#999;font-style:italic">Sin reservas futuras registradas.</div>'
       : `<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
         <thead><tr style="background:#f5eee0">
-          ${['Entrada','Salida','Noches','Huésped','Ingreso'].map((h,i)=>`<th style="padding:8px 10px;text-align:${i===4?'right':'left'};font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">${h}</th>`).join('')}
+          ${['Entrada','Salida','Noches','Ingreso'].map((h,i)=>`<th style="padding:8px 10px;text-align:${i===3?'right':'left'};font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">${h}</th>`).join('')}
         </tr></thead>
         <tbody>
           ${futuras.map(r=>`<tr style="border-top:1px solid #f0e8d8">
             <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkIn)}</td>
             <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkOut)}</td>
             <td style="padding:7px 10px;font-size:11px">${nightsOf(r)}</td>
-            <td style="padding:7px 10px;font-size:11px">${r.guest||''}</td>
             <td style="padding:7px 10px;font-size:12px;text-align:right;font-weight:700">${money(parseInc(r.income))}</td>
           </tr>`).join('')}
           <tr style="border-top:2px solid #2d6e4e;background:#f0f7f2">
-            <td colspan="4" style="padding:9px 10px;font-size:11px;font-weight:800;color:#2d6e4e">INGRESO FUTURO COMPROMETIDO (${futuras.length} reservas)</td>
+            <td colspan="3" style="padding:9px 10px;font-size:11px;font-weight:800;color:#2d6e4e">INGRESO FUTURO COMPROMETIDO (${futuras.length} reservas)</td>
             <td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#2d6e4e">${money(futTotal)}</td>
           </tr>
         </tbody>
       </table>`;
+
+    const tablaGastos = !incluirGastos ? '' : `
+      <div class="section-title">Gastos por mes</div>
+      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
+        <thead><tr style="background:#f5eee0">
+          <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">Mes</th>
+          ${years.map(y=>`<th style="padding:8px 10px;text-align:right;font-size:11px;color:#1a1208">${y}</th>`).join('')}
+        </tr></thead>
+        <tbody>
+          ${MESES.map((ml,m)=>`<tr style="border-top:1px solid #f0e8d8">
+            <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
+            ${years.map(y=>{const g=gcell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${g?'#b83232':'#ccc'}">${g?'−'+money(g):'—'}</td>`;}).join('')}
+          </tr>`).join('')}
+          <tr style="border-top:2px solid #b83232;background:#faf0f0">
+            <td style="padding:9px 10px;font-size:11px;font-weight:800;color:#b83232">TOTAL GASTOS</td>
+            ${years.map(y=>`<td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#b83232">−${money(yearExp(y))}</td>`).join('')}
+          </tr>
+          <tr style="border-top:2px solid #2d6e4e;background:#f0f7f2">
+            <td style="padding:9px 10px;font-size:11px;font-weight:800;color:#2d6e4e">NETO</td>
+            ${years.map(y=>{const n=yearTotal(y)-yearExp(y);return `<td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:${n>=0?'#2d6e4e':'#b83232'}">${money(n)}</td>`;}).join('')}
+          </tr>
+        </tbody>
+      </table>
+      <div style="font-size:9px;color:#999;margin-top:6px;font-style:italic">Gastos registrados por fecha de pago. Incluye la parte proporcional de gastos compartidos (condominio, etc.).</div>`;
+
+    const logoUrl = `${window.location.origin}/customcolor_text-logoname_transparent_background.png`;
 
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
     <title>Informe de ingresos ${name}</title>
@@ -1945,8 +1994,9 @@ function UnitsScreen() {
       .stat-l{font-size:9px;color:#999;text-transform:uppercase;letter-spacing:1px;margin-top:2px}
       @media print{body{padding:16px}}
     </style></head><body>
-    <h1>${name} — Informe de ingresos</h1>
-    <div class="sub">Generado el ${todayLbl} · Porta Al Sole Condos</div>
+    <img src="${logoUrl}" alt="Porta Al Sole" style="width:200px;display:block;margin:0 auto 18px" onerror="this.style.display='none'"/>
+    <h1 style="text-align:center">${name} — Informe de ingresos</h1>
+    <div class="sub" style="text-align:center">Generado el ${todayLbl} · Porta Al Sole Condos</div>
     <div class="stats">
       <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Ingresos ${yNow}</div></div>
       <div class="stat"><div class="stat-n">${nightsNow}</div><div class="stat-l">Noches ${yNow}</div></div>
@@ -1956,6 +2006,7 @@ function UnitsScreen() {
     <div class="section-title">Ingresos por mes</div>
     ${tablaIngresos}
     <div style="font-size:9px;color:#999;margin-top:6px;font-style:italic">Los ingresos se asignan al mes de salida (checkout) de cada reserva.</div>
+    ${tablaGastos}
     <div class="section-title">Reservas futuras</div>
     ${tablaFuturas}
     </body></html>`;
@@ -1963,7 +2014,7 @@ function UnitsScreen() {
     const w = window.open('','_blank');
     w.document.write(html);
     w.document.close();
-    setTimeout(()=>w.print(),500);
+    setTimeout(()=>w.print(),900); // margen para que cargue el logo
   };
 
   const exportUnitPDF = () => {
