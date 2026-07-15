@@ -1978,11 +1978,12 @@ function UnitsScreen() {
     const th = (txt,align) => `<th style="padding:9px 10px;text-align:${align||'left'};font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#8b7355;font-weight:700">${txt}</th>`;
 
     const GRN = '#2d6e4e';
+    const futTag = v => `<div style="font-size:9.5px;font-weight:400;color:${GRN};margin-top:3px;letter-spacing:.2px">+${money(v)} booked</div>`;
     const revCell = (y,m) => {
       const c = cell[`${y}-${m}`];
       if (!c || (!c.inc && !c.fut)) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:#d5cdbb">\u2014</td>`;
-      if (c.inc && c.fut) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:#1a1208;line-height:1.35">${money(c.inc)}<br/><span style="font-size:10px;color:${GRN};font-weight:700">+${money(c.fut)}</span></td>`;
-      if (c.fut) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${GRN};font-weight:700">${money(c.fut)}</td>`;
+      if (c.inc && c.fut) return `<td style="padding:6px 10px;text-align:right"><div style="font-size:12px;color:#1a1208">${money(c.inc)}</div>${futTag(c.fut)}</td>`;
+      if (c.fut) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${GRN}">${money(c.fut)}</td>`;
       return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:#1a1208">${money(c.inc)}</td>`;
     };
 
@@ -2003,7 +2004,7 @@ function UnitsScreen() {
           </tr>
           ${years.some(y=>yearFut(y))?`<tr style="background:#f2f8f4;border-top:1px solid #d8e8de">
             <td style="padding:8px 10px;font-size:10px;font-weight:800;color:${GRN};letter-spacing:.5px">+ CONFIRMED FORWARD BOOKINGS</td>
-            ${years.map(y=>`<td style="padding:8px 10px;text-align:right;font-size:12px;font-weight:800;color:${yearFut(y)?GRN:'#d5cdbb'}">${yearFut(y)?'+'+money(yearFut(y)):'\u2014'}</td>`).join('')}
+            ${years.map(y=>`<td style="padding:8px 10px;text-align:right;font-size:12px;font-weight:700;color:${yearFut(y)?GRN:'#d5cdbb'}">${yearFut(y)?'+'+money(yearFut(y)):'\u2014'}</td>`).join('')}
           </tr>`:''}
           <tr style="border-top:1px solid #f2ecdf">
             <td style="padding:6px 10px;font-size:10px;color:#8b7355">Nights sold (realized)</td>
