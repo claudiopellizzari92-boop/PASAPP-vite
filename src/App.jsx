@@ -4162,6 +4162,7 @@ function ReservationsScreen() {
   const [qbProgress, setQbProgress] = useState('');
   const [qbRate, setQbRate] = useState('1.78');    // tasa AWG → USD
   const [qbReplace, setQbReplace] = useState(true); // reemplazar período al importar (evita duplicados)
+  const [qbFrom, setQbFrom] = useState('');         // importar solo desde esta fecha (protege lo ya organizado)
   const [expOpenMonth, setExpOpenMonth] = useState({}); // {'2026-01': true}
   const [expOpenUnit, setExpOpenUnit] = useState({});   // {'2026-01_8': true}
   const [expOpenName, setExpOpenName] = useState({});   // {'2026-01_8_Kooyman': true}
@@ -4744,6 +4745,14 @@ function ReservationsScreen() {
                               parsed.forEach(r=>{
                                 if (existing.has(`${r.date}|${(r.amount/1.78).toFixed(2)}`)) { r.dup=true; r.include=false; }
                               });
+                              // Por defecto: importar solo lo posterior al último gasto ya registrado,
+                              // así no se tocan los meses que ya revisaste y corregiste a mano.
+                              const fechas = (expenses||[]).map(x=>x.date).filter(Boolean).sort();
+                              if (fechas.length) {
+                                const ult = new Date(fechas[fechas.length-1]+'T12:00:00');
+                                ult.setDate(ult.getDate()+1);
+                                setQbFrom(ult.toISOString().slice(0,10));
+                              } else setQbFrom('');
                               setQbRows(parsed);
                             };
                             rd.readAsText(file);
@@ -5045,10 +5054,12 @@ function ReservationsScreen() {
                         {qbRows&&(()=>{
                           const rate = parseFloat(qbRate) || 1.78;
                           const conv = (a) => a / rate; // AWG → USD
-                          const inc = qbRows.filter(r=>r.include);
+                          const visibles = qbFrom ? qbRows.filter(r=>r.date>=qbFrom) : qbRows;
+                          const ocultas = qbRows.length - visibles.length;
+                          const inc = visibles.filter(r=>r.include);
                           const totalInc = conv(inc.reduce((s,r)=>s+r.amount,0));
-                          const toggleAll = (v) => setQbRows(rows=>rows.map(r=>r.dup?r:{...r,include:v}));
-                          const updRow = (i,patch) => setQbRows(rows=>rows.map((r,j)=>j===i?{...r,...patch}:r));
+                          const toggleAll = (v) => setQbRows(rows=>rows.map(r=>(r.dup||(qbFrom&&r.date<qbFrom))?r:{...r,include:v}));
+                          const updRow = (row,patch) => setQbRows(rows=>rows.map(r=>r===row?{...r,...patch}:r));
 
                           const doImport = async () => {
                             setQbBusy(true);
@@ -5113,9 +5124,17 @@ function ReservationsScreen() {
                               <div style={{background:'var(--surface)',borderRadius:14,padding:'16px',maxWidth:420,width:'94%',maxHeight:'85vh',display:'flex',flexDirection:'column'}}>
                                 <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:4}}>Importar de QuickBooks</div>
                                 <div style={{fontSize:11,color:'var(--muted)',marginBottom:8,lineHeight:1.4}}>
-                                  {qbRows.length} transacciones · <strong style={{color:'var(--gold)'}}>{inc.length} seleccionadas</strong> ({fmtMoney2(totalInc)} USD).
-                                  Los pagos de facturas se excluyen para no contar doble.
-                                  {qbRows.some(r=>r.dup)&&' Los ya registrados aparecen marcados.'}
+                                  {visibles.length} transacciones · <strong style={{color:'var(--gold)'}}>{inc.length} seleccionadas</strong> ({fmtMoney2(totalInc)} USD).
+                                  {ocultas>0&&<> · <span style={{color:'var(--done)'}}>{ocultas} anteriores protegidas</span></>}
+                                </div>
+                                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,background:'rgba(45,110,78,.07)',border:'1px solid rgba(45,110,78,.25)',borderRadius:9,padding:'8px 10px',flexWrap:'wrap'}}>
+                                  <div style={{flex:1,minWidth:150}}>
+                                    <div style={{fontSize:11,fontWeight:700,color:'var(--text)'}}>Importar solo desde</div>
+                                    <div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>Lo anterior a esta fecha no se toca: conservás tus correcciones.</div>
+                                  </div>
+                                  <input type="date" value={qbFrom} disabled={qbBusy} onChange={e=>setQbFrom(e.target.value)}
+                                    style={{fontSize:11,fontWeight:700,padding:'5px 7px',borderRadius:7,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--done)'}}/>
+                                  {qbFrom&&<button onClick={()=>setQbFrom('')} disabled={qbBusy} style={{background:'none',border:'none',color:'var(--muted)',fontSize:10,fontWeight:700,cursor:'pointer',textDecoration:'underline'}}>todo</button>}
                                 </div>
                                 <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,background:'rgba(201,150,58,.07)',border:'1px solid rgba(201,150,58,.2)',borderRadius:9,padding:'7px 10px'}}>
                                   <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Conversión: <strong style={{color:'var(--text)'}}>ƒ (AWG) → $ (USD)</strong></span>
@@ -5134,9 +5153,9 @@ function ReservationsScreen() {
                                   <button onClick={()=>toggleAll(false)} style={{flex:1,fontSize:10,fontWeight:700,padding:'5px',borderRadius:7,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--muted)',cursor:'pointer'}}>Desmarcar todos</button>
                                 </div>
                                 <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:4}} className="hide-scroll">
-                                  {qbRows.map((r,i)=>(
+                                  {visibles.map((r,i)=>(
                                     <div key={i} style={{display:'flex',gap:8,alignItems:'flex-start',padding:'7px 8px',borderRadius:9,background:r.include?'var(--bg)':'transparent',opacity:r.dup?0.45:r.include?1:0.55,border:'1px solid var(--border)'}}>
-                                      <input type="checkbox" checked={r.include} disabled={qbBusy} onChange={e=>updRow(i,{include:e.target.checked})} style={{marginTop:2,accentColor:'#c9963a',flexShrink:0}}/>
+                                      <input type="checkbox" checked={r.include} disabled={qbBusy} onChange={e=>updRow(r,{include:e.target.checked})} style={{marginTop:2,accentColor:'#c9963a',flexShrink:0}}/>
                                       <div style={{flex:1,minWidth:0}}>
                                         <div style={{fontSize:11,fontWeight:600,color:'var(--text)',lineHeight:1.3,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{r.concept}</div>
                                         <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>
@@ -5157,12 +5176,12 @@ function ReservationsScreen() {
                                               {r.units.length>3?`÷ ${r.units.length} unidades`:r.units.map(u=>uname(u)).join(' + ')+' (dividido)'}
                                             </span>
                                           ):(
-                                            <select value={r.unit} disabled={qbBusy} onChange={e=>updRow(i,{unit:Number(e.target.value)})}
+                                            <select value={r.unit} disabled={qbBusy} onChange={e=>updRow(r,{unit:Number(e.target.value)})}
                                               style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:r.units.length?'var(--gold)':'var(--muted)',maxWidth:110}}>
                                               {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
                                             </select>
                                           )}
-                                          <select value={r.category} disabled={qbBusy} onChange={e=>updRow(i,{category:e.target.value})}
+                                          <select value={r.category} disabled={qbBusy} onChange={e=>updRow(r,{category:e.target.value})}
                                             style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--muted)',maxWidth:100}}>
                                             {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
                                           </select>
