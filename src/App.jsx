@@ -1853,28 +1853,30 @@ function UnitsScreen() {
   };
 
   // Informe financiero de la unidad: ingresos mes a mes + reservas futuras (para venta/inversores)
+  // Investor/buyer-facing revenue report for a single unit (English)
   const exportUnitIncomePDF = async () => {
     const name = uname(selU);
-    const hoy = new Date(); hoy.setHours(0,0,0,0);
-    const todayLbl = new Date().toLocaleDateString('es-VE',{year:'numeric',month:'long',day:'numeric'});
+    const today = new Date(); today.setHours(0,0,0,0);
+    const todayLbl = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
     const money = n => '$'+Math.round(n).toLocaleString('en-US');
     const parseInc = v => parseFloat(String(v??'').replace(/[^0-9.\-]/g,''))||0;
     const nightsOf = r => Math.max(1,Math.round((r.checkOut-r.checkIn)/86400000));
-    const MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
     const resU = reservations.filter(r=>r.unitId===selU);
-    if (resU.length===0) { alert('Esta unidad no tiene reservas registradas.'); return; }
+    if (resU.length===0) { alert('This unit has no reservations on record.'); return; }
 
-    // ¿Incluir gastos? (confirm es síncrono, no rompe el gesto del clic)
-    const incluirGastos = confirm('¿Incluir los GASTOS de la unidad en el informe?\n\nAceptar = con gastos y neto por año\nCancelar = solo ingresos');
+    // Sync dialogs first (they keep the click gesture alive)
+    const withExpenses = confirm('Include this unit\u2019s EXPENSES in the report?\n\nOK = revenue, expenses and net income\nCancel = revenue only');
+    const preparedFor = (prompt('Prepared for (optional \u2014 buyer or company name):','')||'').trim();
 
-    // IMPORTANTE: abrir la ventana YA, antes de cualquier await, o el navegador la bloquea
+    // Open the window BEFORE any await, or the browser blocks it
     const w = window.open('','_blank');
-    if (!w) { alert('El navegador bloqueó la ventana emergente. Permitila para este sitio y volvé a intentar.'); return; }
-    w.document.write('<html><body style="font-family:Georgia,serif;background:#fdf8f0;color:#8b7355;padding:40px;text-align:center">Generando informe…</body></html>');
+    if (!w) { alert('Your browser blocked the pop-up. Allow pop-ups for this site and try again.'); return; }
+    w.document.write('<html><body style="font-family:Georgia,serif;background:#fdf8f0;color:#8b7355;padding:40px;text-align:center">Generating report\u2026</body></html>');
 
     let expU = [];
-    if (incluirGastos) {
+    if (withExpenses) {
       try {
         const r = await authFetch('/expenses');
         if (r.ok) {
@@ -1884,143 +1886,207 @@ function UnitsScreen() {
       } catch(e) {}
     }
 
-    // Matriz ingresos por mes (asignados al mes del checkout) × año
+    // Revenue matrix: month x year (revenue booked to the checkout month)
     const incYears = [...new Set(resU.map(r=>r.checkOut.getFullYear()))];
     const expYears = [...new Set(expU.map(x=>parseInt(x.date.slice(0,4))))];
-    const years = [...new Set([...incYears, ...(incluirGastos?expYears:[])])].sort();
-    const cell = {}; // `${y}-${m}` → {inc, noches, n}
+    const years = [...new Set([...incYears, ...(withExpenses?expYears:[])])].sort();
+    const cell = {};
     resU.forEach(r=>{
       const k = `${r.checkOut.getFullYear()}-${r.checkOut.getMonth()}`;
-      if(!cell[k]) cell[k]={inc:0,noches:0,n:0};
+      if(!cell[k]) cell[k]={inc:0,nights:0,n:0};
       cell[k].inc += parseInc(r.income);
-      cell[k].noches += nightsOf(r);
+      cell[k].nights += nightsOf(r);
       cell[k].n++;
     });
-    const yearTotal = y => MESES.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).inc||0),0);
-    const yearNights = y => MESES.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).noches||0),0);
+    const yearTotal  = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).inc||0),0);
+    const yearNights = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).nights||0),0);
 
-    // Matriz de gastos por mes × año
-    const gcell = {}; // `${y}-${m}` → total
+    // Expense matrix
+    const gcell = {};
     expU.forEach(x=>{
       const y = parseInt(x.date.slice(0,4)), m = parseInt(x.date.slice(5,7))-1;
-      const k = `${y}-${m}`;
-      gcell[k] = (gcell[k]||0) + x.amount;
+      gcell[`${y}-${m}`] = (gcell[`${y}-${m}`]||0) + x.amount;
     });
-    const yearExp = y => MESES.reduce((s,_,m)=>s+(gcell[`${y}-${m}`]||0),0);
+    const yearExp = y => MONTHS.reduce((s,_,m)=>s+(gcell[`${y}-${m}`]||0),0);
 
-    // KPIs del año en curso
-    const yNow = hoy.getFullYear();
+    // Occupancy: nights sold / days elapsed in that year (full year for past years)
+    const daysInYear = y => ((y%4===0&&y%100!==0)||y%400===0) ? 366 : 365;
+    const daysElapsed = y => {
+      if (y < today.getFullYear()) return daysInYear(y);
+      if (y > today.getFullYear()) return 0;
+      return Math.round((today - new Date(y,0,1))/86400000) + 1;
+    };
+    const occOf = y => { const d = daysElapsed(y); return d ? (yearNights(y)/d)*100 : 0; };
+
+    // Current-year KPIs
+    const yNow = today.getFullYear();
     const totNow = yearTotal(yNow);
     const nightsNow = yearNights(yNow);
-    const avgNight = nightsNow ? totNow/nightsNow : 0;
+    const adr = nightsNow ? totNow/nightsNow : 0;
+    const occNow = occOf(yNow);
 
-    // Reservas futuras
-    const futuras = resU.filter(r=>r.checkIn>=hoy).sort((a,b)=>a.checkIn-b.checkIn);
-    const futTotal = futuras.reduce((s,r)=>s+parseInc(r.income),0);
-    const fmtD = d => d.toLocaleDateString('es',{day:'2-digit',month:'short',year:'numeric'});
+    // Forward bookings
+    const future = resU.filter(r=>r.checkIn>=today).sort((a,b)=>a.checkIn-b.checkIn);
+    const futTotal = future.reduce((s,r)=>s+parseInc(r.income),0);
+    const futNights = future.reduce((s,r)=>s+nightsOf(r),0);
+    const fmtD = d => d.toLocaleDateString('en-US',{day:'2-digit',month:'short',year:'numeric'});
 
-    const tablaIngresos = `
-      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
-        <thead><tr style="background:#f5eee0">
-          <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">Mes</th>
-          ${years.map(y=>`<th style="padding:8px 10px;text-align:right;font-size:11px;color:#1a1208">${y}</th>`).join('')}
+    // Partial-year flag (first/last year may not be complete)
+    const isPartial = y => {
+      const ms = MONTHS.map((_,m)=>cell[`${y}-${m}`]).filter(Boolean).length;
+      return y===yNow || ms<12;
+    };
+
+    const th = (txt,align) => `<th style="padding:9px 10px;text-align:${align||'left'};font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#8b7355;font-weight:700">${txt}</th>`;
+
+    const revenueTable = `
+      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
+        <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
+          ${th('Month')}
+          ${years.map(y=>th(`${y}${isPartial(y)?' *':''}`,'right')).join('')}
         </tr></thead>
         <tbody>
-          ${MESES.map((ml,m)=>`<tr style="border-top:1px solid #f0e8d8">
+          ${MONTHS.map((ml,m)=>`<tr style="border-top:1px solid #f2ecdf">
             <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
-            ${years.map(y=>{const c=cell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${c?'#1a1208':'#ccc'}">${c?money(c.inc):'—'}</td>`;}).join('')}
+            ${years.map(y=>{const c=cell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${c?'#1a1208':'#d5cdbb'}">${c?money(c.inc):'\u2014'}</td>`;}).join('')}
           </tr>`).join('')}
-          <tr style="border-top:2px solid #c9963a;background:#faf5ea">
-            <td style="padding:9px 10px;font-size:11px;font-weight:800;color:#c9963a">TOTAL</td>
-            ${years.map(y=>`<td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#c9963a">${money(yearTotal(y))}</td>`).join('')}
+          <tr style="border-top:2px solid #c9963a;background:#fbf6ec">
+            <td style="padding:10px;font-size:10px;font-weight:800;color:#c9963a;letter-spacing:.5px">TOTAL NET REVENUE</td>
+            ${years.map(y=>`<td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:#c9963a">${money(yearTotal(y))}</td>`).join('')}
+          </tr>
+          <tr style="border-top:1px solid #f2ecdf">
+            <td style="padding:6px 10px;font-size:10px;color:#8b7355">Nights sold</td>
+            ${years.map(y=>`<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${yearNights(y)}</td>`).join('')}
           </tr>
           <tr>
-            <td style="padding:5px 10px;font-size:9px;color:#999">Noches vendidas</td>
-            ${years.map(y=>`<td style="padding:5px 10px;text-align:right;font-size:10px;color:#999">${yearNights(y)}</td>`).join('')}
+            <td style="padding:6px 10px;font-size:10px;color:#8b7355">Occupancy</td>
+            ${years.map(y=>`<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${occOf(y)?occOf(y).toFixed(0)+'%':'\u2014'}</td>`).join('')}
           </tr>
-        </tbody>
-      </table>`;
-
-    const tablaFuturas = futuras.length===0
-      ? '<div style="font-size:12px;color:#999;font-style:italic">Sin reservas futuras registradas.</div>'
-      : `<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
-        <thead><tr style="background:#f5eee0">
-          ${['Entrada','Salida','Noches','Ingreso'].map((h,i)=>`<th style="padding:8px 10px;text-align:${i===3?'right':'left'};font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">${h}</th>`).join('')}
-        </tr></thead>
-        <tbody>
-          ${futuras.map(r=>`<tr style="border-top:1px solid #f0e8d8">
-            <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkIn)}</td>
-            <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkOut)}</td>
-            <td style="padding:7px 10px;font-size:11px">${nightsOf(r)}</td>
-            <td style="padding:7px 10px;font-size:12px;text-align:right;font-weight:700">${money(parseInc(r.income))}</td>
-          </tr>`).join('')}
-          <tr style="border-top:2px solid #2d6e4e;background:#f0f7f2">
-            <td colspan="3" style="padding:9px 10px;font-size:11px;font-weight:800;color:#2d6e4e">INGRESO FUTURO COMPROMETIDO (${futuras.length} reservas)</td>
-            <td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#2d6e4e">${money(futTotal)}</td>
-          </tr>
-        </tbody>
-      </table>`;
-
-    const tablaGastos = !incluirGastos ? '' : `
-      <div class="section-title">Gastos por mes</div>
-      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
-        <thead><tr style="background:#f5eee0">
-          <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">Mes</th>
-          ${years.map(y=>`<th style="padding:8px 10px;text-align:right;font-size:11px;color:#1a1208">${y}</th>`).join('')}
-        </tr></thead>
-        <tbody>
-          ${MESES.map((ml,m)=>`<tr style="border-top:1px solid #f0e8d8">
-            <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
-            ${years.map(y=>{const g=gcell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${g?'#b83232':'#ccc'}">${g?'−'+money(g):'—'}</td>`;}).join('')}
-          </tr>`).join('')}
-          <tr style="border-top:2px solid #b83232;background:#faf0f0">
-            <td style="padding:9px 10px;font-size:11px;font-weight:800;color:#b83232">TOTAL GASTOS</td>
-            ${years.map(y=>`<td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#b83232">−${money(yearExp(y))}</td>`).join('')}
-          </tr>
-          <tr style="border-top:2px solid #2d6e4e;background:#f0f7f2">
-            <td style="padding:9px 10px;font-size:11px;font-weight:800;color:#2d6e4e">NETO</td>
-            ${years.map(y=>{const n=yearTotal(y)-yearExp(y);return `<td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:${n>=0?'#2d6e4e':'#b83232'}">${money(n)}</td>`;}).join('')}
+          <tr>
+            <td style="padding:6px 10px;font-size:10px;color:#8b7355">Average daily rate</td>
+            ${years.map(y=>{const n=yearNights(y);return `<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${n?money(yearTotal(y)/n):'\u2014'}</td>`;}).join('')}
           </tr>
         </tbody>
       </table>
-      <div style="font-size:9px;color:#999;margin-top:6px;font-style:italic">Gastos registrados por fecha de pago. Incluye la parte proporcional de gastos compartidos (condominio, etc.).</div>`;
+      <div class="note">Revenue is recognized in the month of guest check-out. ${years.some(isPartial)?'* Partial year \u2014 not a full twelve months of operation.':''}</div>`;
+
+    const expenseTable = !withExpenses ? '' : `
+      <div class="section-title">Operating expenses &amp; net income</div>
+      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
+        <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
+          ${th('Month')}
+          ${years.map(y=>th(String(y),'right')).join('')}
+        </tr></thead>
+        <tbody>
+          ${MONTHS.map((ml,m)=>`<tr style="border-top:1px solid #f2ecdf">
+            <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
+            ${years.map(y=>{const g=gcell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${g?'#9c3030':'#d5cdbb'}">${g?'('+money(g).slice(1)+')':'\u2014'}</td>`;}).join('')}
+          </tr>`).join('')}
+          <tr style="border-top:2px solid #9c3030;background:#fbf2f2">
+            <td style="padding:10px;font-size:10px;font-weight:800;color:#9c3030;letter-spacing:.5px">TOTAL EXPENSES</td>
+            ${years.map(y=>`<td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:#9c3030">(${money(yearExp(y)).slice(1)})</td>`).join('')}
+          </tr>
+          <tr style="border-top:2px solid #2d6e4e;background:#f2f8f4">
+            <td style="padding:10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">NET OPERATING INCOME</td>
+            ${years.map(y=>{const n=yearTotal(y)-yearExp(y);return `<td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:${n>=0?'#2d6e4e':'#9c3030'}">${n<0?'('+money(-n).slice(1)+')':money(n)}</td>`;}).join('')}
+          </tr>
+        </tbody>
+      </table>
+      <div class="note">Expenses are recorded on a cash basis (date of payment) and include this unit\u2019s allocated share of shared costs such as condominium fees.</div>`;
+
+    const futureTable = future.length===0
+      ? '<div class="note" style="font-size:12px">No forward bookings on record.</div>'
+      : `<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
+        <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
+          ${th('Check-in')}${th('Check-out')}${th('Nights','right')}${th('Net revenue','right')}
+        </tr></thead>
+        <tbody>
+          ${future.map(r=>`<tr style="border-top:1px solid #f2ecdf">
+            <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkIn)}</td>
+            <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkOut)}</td>
+            <td style="padding:7px 10px;font-size:11px;text-align:right">${nightsOf(r)}</td>
+            <td style="padding:7px 10px;font-size:12px;text-align:right;font-weight:700">${money(parseInc(r.income))}</td>
+          </tr>`).join('')}
+          <tr style="border-top:2px solid #2d6e4e;background:#f2f8f4">
+            <td colspan="2" style="padding:10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">CONFIRMED FORWARD BOOKINGS (${future.length})</td>
+            <td style="padding:10px;text-align:right;font-size:11px;font-weight:700;color:#2d6e4e">${futNights}</td>
+            <td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:#2d6e4e">${money(futTotal)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="note">Guest names withheld for privacy. Bookings are subject to change or cancellation under the applicable booking terms.</div>`;
 
     const logoUrl = `${window.location.origin}/customcolor_text-logoname_transparent_background.png`;
 
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-    <title>Informe de ingresos ${name}</title>
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+    <title>${name} \u2014 Revenue Report</title>
     <style>
-      body{font-family:Georgia,serif;max-width:800px;margin:0 auto;padding:32px;color:#1a1208;background:#fdf8f0}
-      h1{font-size:28px;margin:0 0 4px}
-      .sub{font-size:13px;color:#999;margin-bottom:24px}
-      .section-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#c9963a;margin:24px 0 10px;padding-bottom:6px;border-bottom:2px solid #c9963a40}
-      .stats{display:flex;gap:12px;margin-bottom:8px}
-      .stat{background:#fff;border:1px solid #e8e0d0;border-radius:8px;padding:12px 16px;text-align:center;flex:1}
-      .stat-n{font-size:22px;font-weight:800;color:#c9963a}
-      .stat-l{font-size:9px;color:#999;text-transform:uppercase;letter-spacing:1px;margin-top:2px}
-      @media print{body{padding:16px}}
+      *{box-sizing:border-box}
+      body{font-family:Georgia,'Times New Roman',serif;max-width:820px;margin:0 auto;padding:36px 40px;color:#1a1208;background:#fff}
+      .head{display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid #c9963a;padding-bottom:16px;margin-bottom:22px}
+      .head img{width:150px}
+      .head-r{text-align:right;font-size:10px;color:#8b7355;line-height:1.7}
+      h1{font-size:26px;margin:0 0 2px;letter-spacing:-.4px}
+      .sub{font-size:12px;color:#8b7355;margin-bottom:18px}
+      .banner{background:#fbf6ec;border:1px solid #e0c98d;border-left:4px solid #c9963a;padding:12px 14px;margin-bottom:22px;font-size:11.5px;line-height:1.6;color:#5a4a35}
+      .banner strong{color:#1a1208;letter-spacing:.3px}
+      .stats{display:flex;gap:10px;margin-bottom:8px}
+      .stat{background:#fbf9f4;border:1px solid #e5ddcb;padding:13px 10px;text-align:center;flex:1}
+      .stat-n{font-size:21px;font-weight:800;color:#c9963a;letter-spacing:-.5px}
+      .stat-l{font-size:8px;color:#8b7355;text-transform:uppercase;letter-spacing:1px;margin-top:3px;line-height:1.4}
+      .section-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#c9963a;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid #e5ddcb}
+      .note{font-size:9px;color:#9a9080;margin-top:6px;font-style:italic;line-height:1.5}
+      .foot{margin-top:30px;padding-top:14px;border-top:1px solid #e5ddcb;font-size:8.5px;color:#9a9080;line-height:1.7}
+      @media print{body{padding:18px}.stat{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        table,tr,td,th{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        .section-title{page-break-after:avoid}table{page-break-inside:auto}tr{page-break-inside:avoid}}
     </style></head><body>
-    <img src="${logoUrl}" alt="Porta Al Sole" style="width:200px;display:block;margin:0 auto 18px" onerror="this.style.display='none'"/>
-    <h1 style="text-align:center">${name} — Informe de ingresos</h1>
-    <div class="sub" style="text-align:center">Generado el ${todayLbl} · Porta Al Sole Condos</div>
-    <div class="stats">
-      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Ingresos ${yNow}</div></div>
-      <div class="stat"><div class="stat-n">${nightsNow}</div><div class="stat-l">Noches ${yNow}</div></div>
-      <div class="stat"><div class="stat-n">${avgNight?'$'+Math.round(avgNight):'—'}</div><div class="stat-l">Promedio/noche</div></div>
-      <div class="stat"><div class="stat-n">${money(futTotal)}</div><div class="stat-l">Futuro comprometido</div></div>
+
+    <div class="head">
+      <img src="${logoUrl}" alt="Porta Al Sole" onerror="this.style.display='none'"/>
+      <div class="head-r">
+        <div style="font-weight:700;color:#1a1208;font-size:11px;letter-spacing:1px">PORTA AL SOLE CONDOS</div>
+        <div>Noord, Aruba</div>
+        <div>Report date: ${todayLbl}</div>
+        ${preparedFor?`<div>Prepared for: <strong style="color:#1a1208">${preparedFor}</strong></div>`:''}
+      </div>
     </div>
-    <div class="section-title">Ingresos por mes</div>
-    ${tablaIngresos}
-    <div style="font-size:9px;color:#999;margin-top:6px;font-style:italic">Los ingresos se asignan al mes de salida (checkout) de cada reserva.</div>
-    ${tablaGastos}
-    <div class="section-title">Reservas futuras</div>
-    ${tablaFuturas}
+
+    <h1>${name} \u2014 Revenue &amp; Occupancy Report</h1>
+    <div class="sub">Short-term rental performance${years.length?` \u00b7 ${years[0]}\u2013${years[years.length-1]}`:''}</div>
+
+    <div class="banner">
+      <strong>NET REVENUE TO OWNER.</strong> All revenue figures in this report are stated <strong>after</strong> sales tax,
+      channel fees and the Bocobay management fee have been deducted. Amounts represent the net proceeds actually
+      remitted to the owner, not gross booking value. All figures in USD.
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Net revenue ${yNow} YTD</div></div>
+      <div class="stat"><div class="stat-n">${occNow?occNow.toFixed(0)+'%':'\u2014'}</div><div class="stat-l">Occupancy ${yNow} YTD</div></div>
+      <div class="stat"><div class="stat-n">${adr?money(adr):'\u2014'}</div><div class="stat-l">Average daily rate</div></div>
+      <div class="stat"><div class="stat-n">${money(futTotal)}</div><div class="stat-l">Confirmed forward bookings</div></div>
+    </div>
+
+    <div class="section-title">Net revenue by month</div>
+    ${revenueTable}
+    ${expenseTable}
+    <div class="section-title">Forward bookings</div>
+    ${futureTable}
+
+    <div class="foot">
+      <strong>Confidential.</strong> This report was prepared from the owner\u2019s booking and accounting records and is provided
+      for informational purposes only. Past performance is not a guarantee of future results. Figures are unaudited and may
+      differ from year-end financial statements. This document does not constitute an offer to sell or a solicitation of an
+      offer to buy any property, nor investment, tax or legal advice. Recipients should perform their own due diligence.
+      <br/>Porta Al Sole Condos \u00b7 Noord, Aruba \u00b7 Generated ${todayLbl}
+    </div>
     </body></html>`;
 
     w.document.open();
     w.document.write(html);
     w.document.close();
-    setTimeout(()=>w.print(),900); // margen para que cargue el logo
+    setTimeout(()=>w.print(),900); // give the logo time to load
   };
 
   const exportUnitPDF = () => {
