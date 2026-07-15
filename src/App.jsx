@@ -1901,8 +1901,19 @@ function UnitsScreen() {
       return 'Maintenance, repairs & other';
     };
     const LINE_ORDER = ['Condominium fees','Electricity','Water','Gas','Internet & TV','Cleaning & laundry','Maintenance, repairs & other'];
-    // El pago de capital del préstamo NO es gasto operativo: se excluye del NOI
-    const expOp = expU.filter(e=>e.category!=='préstamo');
+    // Condominio: cuota FIJA mensual, no se toma de los pagos registrados (que llegan con
+    // atrasos y distorsionan el mes). Se calcula por meses transcurridos desde el arranque.
+    const CONDO_MONTHLY = 673.17;
+    const CONDO_START_Y = 2024, CONDO_START_M = 9; // octubre 2024
+    const condoMonths = y => {
+      if (y < CONDO_START_Y || y > today.getFullYear()) return 0;
+      const first = (y===CONDO_START_Y) ? CONDO_START_M : 0;
+      const last  = (y===today.getFullYear()) ? today.getMonth() : 11;
+      return Math.max(0, last - first + 1);
+    };
+    const condoOf = y => condoMonths(y) * CONDO_MONTHLY;
+    // El capital del préstamo no es gasto operativo; el condominio se calcula aparte
+    const expOp = expU.filter(e=>e.category!=='préstamo' && !/condominio|condominium/i.test(e.concept||''));
 
     // Revenue matrix: month x year (revenue booked to the checkout month)
     const incYears = [...new Set(resU.map(r=>r.checkOut.getFullYear()))];
@@ -1926,6 +1937,8 @@ function UnitsScreen() {
       const k = `${expLine(x)}|${y}`;
       gcell[k] = (gcell[k]||0) + x.amount;
     });
+    // Condominio calculado (cuota fija × meses transcurridos)
+    years.forEach(y=>{ const c = condoOf(y); if (c) gcell[`Condominium fees|${y}`] = c; });
     const yearExp = y => LINE_ORDER.reduce((s,l)=>s+(gcell[`${l}|${y}`]||0),0);
     const linesUsed = LINE_ORDER.filter(l=>years.some(y=>gcell[`${l}|${y}`]));
 
@@ -2016,7 +2029,7 @@ function UnitsScreen() {
           </tr>
         </tbody>
       </table>
-      <div class="note">Expenses are recorded on a cash basis (date of payment) and include this unit\u2019s allocated share of building-wide costs such as condominium fees. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).</div>`;
+      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit, accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment). Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).</div>`;
 
     const futureTable = future.length===0
       ? '<div class="note" style="font-size:12px">No forward bookings on record.</div>'
