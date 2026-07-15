@@ -716,6 +716,16 @@ const showNotif = async (title, opts) => {
   } catch (e) { console.log('No se pudo mostrar la notificación:', e); }
 };
 
+// Semana ISO (YYYY-Www) de una fecha dada — para el recordatorio de medición
+const isoWeekOf = (date) => {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const ys = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const wn = Math.ceil((((d - ys) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(wn).padStart(2,'0')}`;
+};
+
 // Comprime una imagen en el cliente antes de subirla (máx 1200px, JPEG 80%).
 // Reduce ~5-10x el peso → ahorra espacio en Cloudinary y memoria en el móvil.
 const compressImage = (file, maxDim=1200, quality=0.8) => new Promise((resolve) => {
@@ -2869,6 +2879,7 @@ function RecordsScreen() {
   const [viewMode,  setViewMode] = useState('week'); // 'week' | 'month' | 'year'
   const [offset,    setOffset]   = useState(0);      // weeks/months/years back
   const [showAdd,   setShowAdd]  = useState(false);
+  const [showExport, setShowExport] = useState(false); // menú ⋯ (CSV/PDF)
   const [saveAlert, setSaveAlert] = useState(null);
   const [nm, setNm] = useState({unitId:1,type:'agua',value:''});
   const [showScan,  setShowScan]  = useState(false);
@@ -2988,16 +2999,20 @@ function RecordsScreen() {
 
       // Historial: consumo por noche ocupada de las últimas semanas de esta unidad
       const hist = [];
+      const spark = [];   // consumo semanal crudo (para el mini-gráfico de tendencia)
       for (let k = 1; k <= 12; k++) {
         const wA = getISOWeek(offset + k), wB = getISOWeek(offset + k + 1);
         const a = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===wA);
         const b = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===wB);
         if (a && b) {
           const c = a.value - b.value;
+          if (c >= 0) spark.push(c);
           const nn = nightsInWeek(m.unitId, wA);
           if (c >= 0 && nn > 0) hist.push({ perNight: c / nn });
         }
       }
+      spark.reverse(); // viejo → nuevo
+      if (consumption != null && consumption >= 0) spark.push(consumption);
       const avgPerNight = hist.length >= 3
         ? hist.reduce((s,h)=>s+h.perNight,0) / hist.length
         : null;
@@ -3006,15 +3021,15 @@ function RecordsScreen() {
       if (consumption != null) {
         if (nights === 0 && consumption >= MIN_VACIO) {
           // La alerta más valiosa: gasta sin nadie adentro
-          alert = { kind:'vacio', direction:'up', text:`Consumo con la unidad vacía · posible fuga` };
+          alert = { kind:'vacio', direction:'up', pct:null, text:`Consumo con la unidad vacía · posible fuga` };
         } else if (nights > 0 && avgPerNight && avgPerNight > 0 && consumption >= MIN_ABS) {
           const perNight = consumption / nights;
           const pct = ((perNight - avgPerNight) / avgPerNight) * 100;
-          if (pct >= 60)  alert = { kind:'alto', direction:'up',   text:`${Math.round(pct)}% sobre su promedio por noche ocupada` };
-          else if (pct <= -60) alert = { kind:'bajo', direction:'down', text:`${Math.round(Math.abs(pct))}% bajo su promedio por noche ocupada` };
+          if (pct >= 60)  alert = { kind:'alto', direction:'up',   pct:Math.round(pct), text:`${Math.round(pct)}% sobre su promedio por noche ocupada` };
+          else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)), text:`${Math.round(Math.abs(pct))}% bajo su promedio por noche ocupada` };
         }
       }
-      return { ...m, consumption, alert, nights, avgPerNight, label: uname(m.unitId), sub: null };
+      return { ...m, consumption, alert, nights, avgPerNight, spark, label: uname(m.unitId), sub: null };
     });
   };
 
@@ -3239,20 +3254,29 @@ function RecordsScreen() {
       <div className="rhead">
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
           <div className="header-title">Registros</div>
-          <div style={{display:'flex',gap:5}}>
-            {isAdmin&&<button className="hbtn" title="Descargar CSV" onClick={downloadCSV}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              <span style={{fontSize:9,letterSpacing:.5,marginLeft:2}}>CSV</span>
-            </button>}
-            {isAdmin&&<button className="hbtn" title="Descargar PDF" onClick={downloadPDF}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              <span style={{fontSize:9,letterSpacing:.5,marginLeft:2}}>PDF</span>
-            </button>}
-            {viewMode==='week'&&<button className="hbtn" style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:700,display:'flex',alignItems:'center',gap:5}} onClick={()=>{setScanIdx(0);setScanVal('');setScanDone(false);setScanResults([]);setShowScan(true);}}>
+          <div style={{display:'flex',gap:5,position:'relative'}}>
+            {viewMode==='week'&&<button className="hbtn" style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:700,display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}} onClick={()=>{setScanIdx(0);setScanVal('');setScanDone(false);setScanResults([]);setShowScan(true);}}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
               Toma rápida
             </button>}
             {viewMode==='week'&&<button className="hbtn hbtn-g" onClick={()=>setShowAdd(true)}><Ic d={D.plus} sz={14}/></button>}
+            {isAdmin&&<button className="hbtn" title="Exportar" onClick={()=>setShowExport(v=>!v)} style={{fontSize:16,fontWeight:700,letterSpacing:1,lineHeight:1}}>⋯</button>}
+            {showExport&&(
+              <>
+                <div onClick={()=>setShowExport(false)} style={{position:'fixed',inset:0,zIndex:40}}/>
+                <div style={{position:'absolute',top:'110%',right:0,zIndex:41,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 6px 22px rgba(0,0,0,.35)',overflow:'hidden',minWidth:170}}>
+                  <button onClick={()=>{setShowExport(false);downloadCSV();}} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'10px 14px',background:'none',border:'none',cursor:'pointer',fontSize:12,fontWeight:600,color:'var(--text)',textAlign:'left'}}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                    Descargar CSV
+                  </button>
+                  <div style={{height:1,background:'var(--border)'}}/>
+                  <button onClick={()=>{setShowExport(false);downloadPDF();}} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'10px 14px',background:'none',border:'none',cursor:'pointer',fontSize:12,fontWeight:600,color:'var(--text)',textAlign:'left'}}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    Informe PDF
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -3369,39 +3393,58 @@ function RecordsScreen() {
                   <span style={{flex:1,paddingLeft:8}}>Consumo</span>
                   <span style={{textAlign:'right'}}>Lectura</span>
                 </div>
+                <style>{`@media(min-width:760px){.rweek-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 10px;align-items:start;padding:0 2px;}}`}</style>
+                <div className="rweek-grid">
                 {rows.map((row,i)=>{
-                  const isUp = row.alert?.direction==='up';
+                  // Severidad: rojo = fuga o >150% · ámbar = 60–150% · verde = bajo
+                  const sev = row.alert
+                    ? (row.alert.kind==='vacio' || (row.alert.kind==='alto' && row.alert.pct>150)) ? 'red'
+                    : row.alert.kind==='alto' ? 'amber' : 'low'
+                    : null;
+                  const sevStyle = sev==='red'   ? {background:'var(--urgent-bg)',        color:'var(--urgent)'}
+                                 : sev==='amber' ? {background:'rgba(201,150,58,.16)',    color:'#a8762a'}
+                                 :                 {background:'rgba(45,110,78,.10)',     color:'var(--done)'};
+                  const sparkMax = row.spark && row.spark.length>1 ? Math.max(...row.spark, 0.1) : 0;
                   return (
                     <div key={i} className="rrec" onClick={()=>setSelMeas(row)} style={{cursor:'pointer'}}>
                       <div className="rrec-row">
                         <div className="rrec-name">{row.label}</div>
-                        <div className="rrec-consumo">
+                        <div style={{flex:1,minWidth:0,paddingLeft:8,display:'flex',alignItems:'center',flexWrap:'wrap',gap:'2px 8px'}}>
                           {row.consumption!=null?(
                             <>
-                              <span style={{fontSize:12,fontWeight:700,color:row.consumption<0?'var(--urgent)':row.consumption>0?'var(--done)':'var(--muted)'}}>
+                              <span style={{fontSize:14,fontWeight:700,color:'var(--text)'}}>
                                 {row.consumption>=0?'+':''}{row.consumption.toFixed(1)}{' '}
                                 <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
                               </span>
-                              <span style={{fontSize:9,color:'var(--muted)',marginLeft:8}}>
-                                {row.nights===0?'· vacía':`· ${row.nights} noche${row.nights!==1?'s':''}`}
+                              <span style={{fontSize:9,color:'var(--muted)'}}>
+                                {row.nights===0?'vacía':`${row.nights} noche${row.nights!==1?'s':''}`}
                                 {row.nights>0&&row.consumption>0?` · ${(row.consumption/row.nights).toFixed(1)}/noche`:''}
                               </span>
+                              {row.alert&&(
+                                <span style={{...sevStyle,display:'inline-flex',alignItems:'center',gap:3,fontSize:9.5,fontWeight:700,padding:'2px 7px',borderRadius:20,whiteSpace:'nowrap'}}>
+                                  {row.alert.kind==='vacio'?'💧 posible fuga':`${row.alert.direction==='up'?'▲':'▼'} ${row.alert.pct}%`}
+                                </span>
+                              )}
                             </>
                           ):(
                             <span style={{fontSize:10,color:'var(--muted)',fontStyle:'italic'}}>sin ref.</span>
                           )}
                         </div>
-                        <div className="rrec-val">{row.value} <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span></div>
+                        {sparkMax>0&&(
+                          <div style={{display:'flex',alignItems:'flex-end',gap:1.5,height:22,marginRight:9,flexShrink:0}} title="Últimas semanas">
+                            {row.spark.slice(-9).map((c,k,arr)=>{
+                              const last = k===arr.length-1;
+                              return <div key={k} style={{width:3.5,borderRadius:1,height:Math.max(2,c/sparkMax*22),
+                                background: last ? (sev==='red'?'var(--urgent)':sev==='amber'?'#c9963a':'var(--gold)') : 'rgba(0,0,0,.13)'}}/>;
+                            })}
+                          </div>
+                        )}
+                        <div style={{fontSize:12,fontWeight:600,color:'var(--muted)',flexShrink:0,textAlign:'right'}}>{row.value} <span style={{fontSize:9,fontWeight:400}}>{unit2}</span></div>
                       </div>
-                      {row.alert&&(
-                        <div className="rrec-alert" style={{background:isUp?'var(--urgent-bg)':'rgba(45,110,78,.08)',color:isUp?'var(--urgent)':'var(--done)'}}>
-                          <span>{row.alert.kind==='vacio'?'💧':isUp?'▲':'▼'}</span>
-                          <span>{row.alert.text}</span>
-                        </div>
-                      )}
                     </div>
                   );
                 })}
+                </div>
               </>
             )
           ) : (
@@ -3786,6 +3829,16 @@ function DashboardScreen({ onNavigate }) {
   const upcomingCheckins = reservations.filter(r=>r.checkIn>now&&r.checkIn<=next7)
     .sort((a,b)=>a.checkIn-b.checkIn);
 
+  // ── Medición semanal de agua pendiente ────────────────────────
+  // Solo considera unidades que ya tienen historial de agua (se autoadapta
+  // si alguna unidad deja de medirse o se agrega una nueva).
+  const semanaActual = isoWeekOf(now);
+  const aguaTracked  = [...new Set((measurements||[]).filter(m=>m.type==='agua').map(m=>m.unitId))];
+  const aguaMissing  = aguaTracked.filter(uid =>
+    !(measurements||[]).some(m=>m.type==='agua' && m.week===semanaActual && m.unitId===uid)
+  ).sort((a,b)=>a-b);
+  const aguaPendiente = aguaTracked.length > 0 && aguaMissing.length > 0;
+
   // ── Notificaciones ───────────────────────────────────────────
   useEffect(() => {
     if (!('Notification' in window) || !allTasks || !allTasks.length) return;
@@ -3835,6 +3888,25 @@ function DashboardScreen({ onNavigate }) {
     if (Notification.permission === 'granted') avisar();
     else if (Notification.permission === 'default') Notification.requestPermission().then(p=>{ if(p==='granted') avisar(); });
   }, [reservations]);
+
+  // ── Recordatorio semanal de medición de agua ──────────────────
+  // Una vez por día, mientras falten unidades por medir esta semana.
+  useEffect(() => {
+    if (!('Notification' in window) || !measurements || !measurements.length) return;
+    if (!aguaPendiente) return;
+    const hoyStr = now.toDateString();
+    if (localStorage.getItem('pas_agua_aviso') === hoyStr) return;
+
+    const avisar = () => {
+      const lista = aguaMissing.slice(0,6).map(uname).join(', ') + (aguaMissing.length>6?'…':'');
+      showNotif('💧 Medición semanal de agua', {
+        body: `Falta${aguaMissing.length!==1?'n':''} ${aguaMissing.length} unidad${aguaMissing.length!==1?'es':''} por medir esta semana:\n${lista}`,
+        icon: 'apple-touch-icon.png', tag: 'agua-semanal',
+      });
+      localStorage.setItem('pas_agua_aviso', hoyStr);
+    };
+    if (Notification.permission === 'granted') avisar();
+  }, [measurements]);
 
   const greeting = () => {
     const h = now.getHours();
@@ -3891,6 +3963,26 @@ function DashboardScreen({ onNavigate }) {
       <div className="dash-body">
         <div className="dash-cols">
         <div className="dash-col">
+
+        {/* ── MEDICIÓN SEMANAL DE AGUA PENDIENTE ── */}
+        {aguaPendiente && (
+          <div onClick={()=>onNavigate('records')} style={{
+            display:'flex', alignItems:'center', gap:11, cursor:'pointer',
+            background:'rgba(36,113,163,.10)', border:'1px solid rgba(36,113,163,.30)',
+            borderRadius:'var(--radius)', padding:'11px 13px', marginBottom:12,
+          }}>
+            <span style={{fontSize:20,flexShrink:0}}>💧</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12.5,fontWeight:700,color:'#5aa7d6'}}>
+                Medición semanal de agua pendiente
+              </div>
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                Falta{aguaMissing.length!==1?'n':''} {aguaMissing.length} de {aguaTracked.length}: {aguaMissing.slice(0,5).map(uname).join(', ')}{aguaMissing.length>5?'…':''}
+              </div>
+            </div>
+            <span style={{color:'var(--muted)',fontSize:16,flexShrink:0}}>›</span>
+          </div>
+        )}
 
         {/* ── VERIFICACIONES DE UNIDADES (salidas y entradas próximas) ── */}
         {(()=>{
