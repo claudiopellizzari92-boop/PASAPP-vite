@@ -3151,6 +3151,58 @@ function RecordsScreen() {
   };
 
   // ── Downloads (mes completo) ────────────────────────────────
+  // Mismo criterio de alerta que la vista Semana: ocupación + promedio
+  // histórico por noche; Recepción/Áreas Comunes usan su propio promedio
+  // semanal (nunca "posible fuga" por estar vacías, ya que siempre lo están).
+  const computeAlertForExport = (m, ws) => {
+    const MIN_ABS   = type==='agua' ? 3 : 60;
+    const MIN_VACIO = type==='agua' ? 2 : 30;
+    const prevWs = getPrevWeekOf(ws);
+    const prev = prevWs ? measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prevWs) : null;
+    const consumption = prev!=null ? m.value - prev.value : null;
+    const nights = nightsInWeek(m.unitId, ws);
+    const isSpecial = !!SPECIAL[m.unitId];
+
+    // Cadena de semanas anteriores a ws para reconstruir el historial
+    const chain = [ws];
+    for (let i=1;i<=13;i++){ const p=getPrevWeekOf(chain[i-1]); if(!p) break; chain.push(p); }
+
+    const hist = [], spark = [];
+    for (let k=1;k<=12;k++){
+      const wA = chain[k], wB = chain[k+1];
+      if (!wA || !wB) break;
+      const a = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===wA);
+      const b = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===wB);
+      if (a && b) {
+        const c = a.value - b.value;
+        if (c >= 0) spark.push(c);
+        const nn = nightsInWeek(m.unitId, wA);
+        if (c >= 0 && nn > 0) hist.push({ perNight: c / nn });
+      }
+    }
+    const avgPerNight = hist.length >= 3 ? hist.reduce((s,h)=>s+h.perNight,0)/hist.length : null;
+
+    let alert = null;
+    if (consumption != null) {
+      if (isSpecial) {
+        const avgWeek = spark.length >= 3 ? spark.reduce((s,c)=>s+c,0)/spark.length : null;
+        if (avgWeek && avgWeek > 0 && consumption >= MIN_ABS) {
+          const pct = ((consumption - avgWeek) / avgWeek) * 100;
+          if (pct >= 60)       alert = { kind:'alto', direction:'up',   pct:Math.round(pct) };
+          else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)) };
+        }
+      } else if (nights === 0 && consumption >= MIN_VACIO) {
+        alert = { kind:'vacio', direction:'up', pct:null };
+      } else if (nights > 0 && avgPerNight && avgPerNight > 0 && consumption >= MIN_ABS) {
+        const perNight = consumption / nights;
+        const pct = ((perNight - avgPerNight) / avgPerNight) * 100;
+        if (pct >= 60)       alert = { kind:'alto', direction:'up',   pct:Math.round(pct) };
+        else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)) };
+      }
+    }
+    return { consumption, alert };
+  };
+
   const getMonthExportData = () => {
     // Always export the current visible month, week by week, all units
     const MONTHS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -3162,32 +3214,24 @@ function RecordsScreen() {
     // Build rows: one per unit per week
     const exportRows = [];
     for (const ws of wks) {
-      const prevWs = (() => { for(let i=1;i<54;i++){if(getISOWeek(i)===ws)return getISOWeek(i+1);} return null; })();
-      const prev2Ws = prevWs ? (() => { for(let i=1;i<54;i++){if(getISOWeek(i)===prevWs)return getISOWeek(i+1);} return null; })() : null;
       const wkMeasurements = measurements.filter(m=>m.type===type&&m.week===ws);
       for (const m of wkMeasurements) {
-        const prev  = prevWs  ? measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prevWs)  : null;
-        const prev2 = prev2Ws ? measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prev2Ws) : null;
-        const consumption = prev!=null ? m.value - prev.value : null;
-        let alert = null;
-        if (prev && prev2) {
-          const cC = m.value - prev.value, cP = prev.value - prev2.value;
-          if (cP > 0 && cC >= 0) {
-            const pct = ((cC-cP)/cP)*100;
-            if (Math.abs(pct)>=20) alert = {pct:Math.round(pct), direction:pct>0?'up':'down'};
-          }
-        }
+        const { consumption, alert } = computeAlertForExport(m, ws);
         exportRows.push({ week: ws, unitLabel: uname(m.unitId), value: m.value, consumption, alert, unit });
       }
     }
     return { monthLabel, exportRows, unit, wks };
   };
 
+  const alertText = a => !a ? '' : a.kind==='vacio' ? 'Posible fuga' : `${a.direction==='up'?'+':'-'}${a.pct}%`;
+  // Severidad visual: rojo = fuga o >150% · ámbar = 60–150% · verde = por debajo
+  const alertSeverity = a => !a ? null : (a.kind==='vacio' || (a.kind==='alto' && a.pct>150)) ? 'red' : a.kind==='alto' ? 'amber' : 'low';
+
   const downloadCSV = () => {
     const { monthLabel, exportRows, unit } = getMonthExportData();
     const header = `Semana,Unidad,Lectura (${unit}),Consumo (${unit}),Alerta`;
     const body = exportRows.map(r =>
-      `"${r.week}","${r.unitLabel}",${r.value},${r.consumption!=null?r.consumption.toFixed(1):''},${r.alert?(r.alert.direction==='up'?'+':'')+r.alert.pct+'%':''}`
+      `"${r.week}","${r.unitLabel}",${r.value},${r.consumption!=null?r.consumption.toFixed(1):''},${alertText(r.alert)}`
     ).join('\n');
     const csv = `Porta Al Sole - Registros de ${type}\nMes: ${monthLabel}\nTipo: ${type==='agua'?'Agua (m³)':'Luz (kWh)'}\n\n${header}\n${body}`;
     const blob = new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'});
@@ -3205,14 +3249,16 @@ function RecordsScreen() {
     // Group rows by week for visual separation
     let tableRows = '';
     let lastWeek = '';
+    const sevColors = { red:'#b83232', amber:'#a8762a', low:'#2d6e4e' };
     for (const r of exportRows) {
       const weekHeader = r.week !== lastWeek
         ? `<tr><td colspan="5" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:#c9963a;letter-spacing:1px;text-transform:uppercase;background:#faf5ec;border-bottom:1px solid #e4d9c8">${r.week}</td></tr>`
         : '';
       lastWeek = r.week;
-      const cColor = r.consumption!=null ? (r.consumption>0?'#2d6e4e':r.consumption<0?'#b83232':'#8b7355') : '#8b7355';
+      const cColor = r.consumption!=null ? (r.consumption<0?'#b83232':'#1a1208') : '#8b7355';
+      const sev = alertSeverity(r.alert);
       const alertCell = r.alert
-        ? `<span style="color:${r.alert.direction==='up'?'#b83232':'#2d6e4e'};font-weight:700;font-size:11px">${r.alert.direction==='up'?'▲':'▼'} ${Math.abs(r.alert.pct)}%</span>`
+        ? `<span style="color:${sevColors[sev]};font-weight:700;font-size:11px">${r.alert.kind==='vacio'?'💧 Posible fuga':`${r.alert.direction==='up'?'▲':'▼'} ${r.alert.pct}%`}</span>`
         : '<span style="color:#ccc">—</span>';
       tableRows += `${weekHeader}<tr style="background:#fff">
         <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;font-size:11px;color:#8b7355">${r.week}</td>
