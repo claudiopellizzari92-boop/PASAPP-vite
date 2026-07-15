@@ -3018,8 +3018,20 @@ function RecordsScreen() {
         : null;
 
       let alert = null;
+      const isSpecial = !!SPECIAL[m.unitId];
       if (consumption != null) {
-        if (nights === 0 && consumption >= MIN_VACIO) {
+        if (isSpecial) {
+          // Recepción y Áreas Comunes no tienen huéspedes: nunca son "fuga por vacío".
+          // Se comparan contra su propio promedio semanal histórico.
+          const avgWeek = spark.length >= 4
+            ? spark.slice(0,-1).reduce((s,c)=>s+c,0) / (spark.length-1)
+            : null;
+          if (avgWeek && avgWeek > 0 && consumption >= MIN_ABS) {
+            const pct = ((consumption - avgWeek) / avgWeek) * 100;
+            if (pct >= 60)       alert = { kind:'alto', direction:'up',   pct:Math.round(pct), text:`${Math.round(pct)}% sobre su promedio semanal` };
+            else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)), text:`${Math.round(Math.abs(pct))}% bajo su promedio semanal` };
+          }
+        } else if (nights === 0 && consumption >= MIN_VACIO) {
           // La alerta más valiosa: gasta sin nadie adentro
           alert = { kind:'vacio', direction:'up', pct:null, text:`Consumo con la unidad vacía · posible fuga` };
         } else if (nights > 0 && avgPerNight && avgPerNight > 0 && consumption >= MIN_ABS) {
@@ -3029,7 +3041,7 @@ function RecordsScreen() {
           else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)), text:`${Math.round(Math.abs(pct))}% bajo su promedio por noche ocupada` };
         }
       }
-      return { ...m, consumption, alert, nights, avgPerNight, spark, label: uname(m.unitId), sub: null };
+      return { ...m, consumption, alert, nights, avgPerNight, spark, isSpecial, label: uname(m.unitId), sub: null };
     });
   };
 
@@ -3417,8 +3429,9 @@ function RecordsScreen() {
                                 <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
                               </span>
                               <span style={{fontSize:9,color:'var(--muted)'}}>
-                                {row.nights===0?'vacía':`${row.nights} noche${row.nights!==1?'s':''}`}
-                                {row.nights>0&&row.consumption>0?` · ${(row.consumption/row.nights).toFixed(1)}/noche`:''}
+                                {row.isSpecial ? 'medidor común'
+                                  : row.nights===0?'vacía':`${row.nights} noche${row.nights!==1?'s':''}`}
+                                {!row.isSpecial&&row.nights>0&&row.consumption>0?` · ${(row.consumption/row.nights).toFixed(1)}/noche`:''}
                               </span>
                               {row.alert&&(
                                 <span style={{...sevStyle,display:'inline-flex',alignItems:'center',gap:3,fontSize:9.5,fontWeight:700,padding:'2px 7px',borderRadius:20,whiteSpace:'nowrap'}}>
@@ -3456,63 +3469,67 @@ function RecordsScreen() {
               </div>
             ) : (
               <div className="rec-grid" style={{padding:'8px 11px',display:'flex',flexDirection:'column',gap:8,paddingBottom:80}}>
-                {unitGroups.map((grp,i)=>(
+                {unitGroups.map((grp,i)=>{
+                  const bars   = grp.periods.filter(p=>p.consumption!=null);
+                  const maxBar = bars.length ? Math.max(...bars.map(p=>Math.abs(p.consumption)), 0.1) : 0;
+                  const avg    = bars.length ? bars.reduce((s,p)=>s+p.consumption,0)/bars.length : null;
+                  return (
                   <div key={i} style={{background:'var(--surface)',borderRadius:'var(--radius)',border:'1px solid var(--border)',overflow:'hidden'}}>
                     {/* Unit header */}
-                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'9px 13px',borderBottom:'1px solid var(--border)',background:'rgba(0,0,0,.02)'}}>
-                      <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{grp.unitLabel}</div>
-                      <div style={{textAlign:'right'}}>
-                        {grp.total!=null?(
-                          <span style={{fontSize:13,fontWeight:700,color:grp.total>0?'var(--done)':grp.total<0?'var(--urgent)':'var(--muted)'}}>
-                            {grp.total>=0?'+':''}{grp.total.toFixed(1)}{' '}
-                            <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
-                          </span>
-                        ):<span style={{fontSize:10,color:'var(--muted)',fontStyle:'italic'}}>sin ref.</span>}
-                        <div style={{fontSize:9,color:'var(--muted)',textAlign:'right',marginTop:1,textTransform:'uppercase',letterSpacing:.5}}>total</div>
-                      </div>
-                    </div>
-                    {/* Mini gráfico de barras de tendencia */}
-                    {(() => {
-                      const bars = grp.periods.filter(p=>p.consumption!=null);
-                      if (bars.length < 2) return null;
-                      const maxBar = Math.max(...bars.map(p=>Math.abs(p.consumption)), 0.1);
-                      return (
-                        <div style={{display:'flex',alignItems:'flex-end',gap:3,padding:'10px 13px 8px',height:54,borderBottom:'1px solid var(--border)'}}>
-                          {bars.map((p,k)=>{
-                            const h = Math.max(3, Math.abs(p.consumption)/maxBar*38);
-                            const neg = p.consumption<0;
-                            return (
-                              <div key={k} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:2}}>
-                                <div style={{width:'100%',maxWidth:18,height:h,borderRadius:3,background:neg?'var(--urgent)':'var(--gold)',opacity:.85}} title={`${p.label}: ${p.consumption.toFixed(1)} ${unit2}`}/>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })()}
-                    {/* Period rows */}
-                    {grp.periods.map((p,j)=>(
-                      <div key={j} style={{display:'flex',alignItems:'center',padding:'7px 13px',borderBottom:j<grp.periods.length-1?'1px solid var(--border)':'none',gap:0}}>
-                        <div style={{minWidth:52,flexShrink:0,fontSize:11,color:'var(--muted)',fontWeight:600}}>{p.label}</div>
-                        <div style={{flex:1,paddingLeft:8}}>
-                          {p.consumption!=null?(
-                            <span style={{fontSize:12,fontWeight:700,color:p.consumption<0?'var(--urgent)':p.consumption>0?'var(--done)':'var(--muted)'}}>
-                              {p.consumption>=0?'+':''}{p.consumption.toFixed(1)}{' '}
-                              <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
-                            </span>
-                          ):(
-                            <span style={{fontSize:10,color:'var(--muted)',fontStyle:'italic'}}>sin ref.</span>
-                          )}
-                        </div>
-                        {viewMode==='month'&&p.value!=null&&(
-                          <div style={{fontSize:13,fontWeight:700,color:'var(--text)',textAlign:'right',whiteSpace:'nowrap'}}>
-                            {p.value} <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 13px',borderBottom:'1px solid var(--border)',background:'rgba(0,0,0,.02)'}}>
+                      <div style={{minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{grp.unitLabel}</div>
+                        {avg!=null&&bars.length>1&&(
+                          <div style={{fontSize:9.5,color:'var(--muted)',marginTop:1}}>
+                            promedio {avg.toFixed(1)} {unit2} · {bars.length} {viewMode==='month'?'semanas':'meses'}
                           </div>
                         )}
                       </div>
-                    ))}
+                      <div style={{textAlign:'right',flexShrink:0}}>
+                        {grp.total!=null?(
+                          <span style={{fontSize:16,fontWeight:700,color:grp.total<0?'var(--urgent)':'var(--text)',fontFamily:'var(--serif)'}}>
+                            {grp.total>=0?'+':''}{grp.total.toFixed(1)}{' '}
+                            <span style={{fontSize:10,fontWeight:400,color:'var(--muted)',fontFamily:'var(--sans)'}}>{unit2}</span>
+                          </span>
+                        ):<span style={{fontSize:10,color:'var(--muted)',fontStyle:'italic'}}>sin ref.</span>}
+                        <div style={{fontSize:8.5,color:'var(--muted)',textAlign:'right',marginTop:1,textTransform:'uppercase',letterSpacing:.6}}>total</div>
+                      </div>
+                    </div>
+                    {/* Filas de período con barra proporcional inline */}
+                    {grp.periods.map((p,j)=>{
+                      const w     = p.consumption!=null && maxBar>0 ? Math.max(2, Math.abs(p.consumption)/maxBar*100) : 0;
+                      const isMax = p.consumption!=null && Math.abs(p.consumption)===maxBar && bars.length>1;
+                      const neg   = p.consumption<0;
+                      return (
+                        <div key={j} style={{display:'flex',alignItems:'center',gap:9,padding:'7px 13px',borderBottom:j<grp.periods.length-1?'1px solid var(--border)':'none'}}>
+                          <div style={{width:46,flexShrink:0,fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{p.label}</div>
+                          <div style={{flex:1,minWidth:24,height:7,background:'var(--border)',borderRadius:4,overflow:'hidden'}}>
+                            {p.consumption!=null&&(
+                              <div style={{height:'100%',width:w+'%',borderRadius:4,transition:'width .35s',
+                                background: neg ? 'var(--urgent)' : 'var(--gold)', opacity: neg?.9:(isMax?1:.42)}}/>
+                            )}
+                          </div>
+                          <div style={{width:64,flexShrink:0,textAlign:'right'}}>
+                            {p.consumption!=null?(
+                              <span style={{fontSize:12,fontWeight:700,color:neg?'var(--urgent)':'var(--text)'}}>
+                                {p.consumption>=0?'+':''}{p.consumption.toFixed(1)}{' '}
+                                <span style={{fontSize:9,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
+                              </span>
+                            ):(
+                              <span style={{fontSize:9.5,color:'var(--muted)',fontStyle:'italic'}}>sin ref.</span>
+                            )}
+                          </div>
+                          {viewMode==='month'&&(
+                            <div style={{width:52,flexShrink:0,fontSize:11,fontWeight:600,color:'var(--muted)',textAlign:'right',whiteSpace:'nowrap'}}>
+                              {p.value!=null?<>{p.value} <span style={{fontSize:8.5,fontWeight:400}}>{unit2}</span></>:''}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )
           )
