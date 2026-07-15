@@ -1865,8 +1865,14 @@ function UnitsScreen() {
     const resU = reservations.filter(r=>r.unitId===selU);
     if (resU.length===0) { alert('Esta unidad no tiene reservas registradas.'); return; }
 
-    // ¿Incluir gastos? (se traen frescos del servidor)
+    // ¿Incluir gastos? (confirm es síncrono, no rompe el gesto del clic)
     const incluirGastos = confirm('¿Incluir los GASTOS de la unidad en el informe?\n\nAceptar = con gastos y neto por año\nCancelar = solo ingresos');
+
+    // IMPORTANTE: abrir la ventana YA, antes de cualquier await, o el navegador la bloquea
+    const w = window.open('','_blank');
+    if (!w) { alert('El navegador bloqueó la ventana emergente. Permitila para este sitio y volvé a intentar.'); return; }
+    w.document.write('<html><body style="font-family:Georgia,serif;background:#fdf8f0;color:#8b7355;padding:40px;text-align:center">Generando informe…</body></html>');
+
     let expU = [];
     if (incluirGastos) {
       try {
@@ -2011,7 +2017,7 @@ function UnitsScreen() {
     ${tablaFuturas}
     </body></html>`;
 
-    const w = window.open('','_blank');
+    w.document.open();
     w.document.write(html);
     w.document.close();
     setTimeout(()=>w.print(),900); // margen para que cargue el logo
