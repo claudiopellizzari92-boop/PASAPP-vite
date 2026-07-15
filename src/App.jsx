@@ -1964,10 +1964,13 @@ function UnitsScreen() {
     const futNights = future.reduce((s,r)=>s+nightsOf(r),0);
     const fmtD = d => d.toLocaleDateString('en-US',{day:'2-digit',month:'short',year:'numeric'});
 
-    // Partial-year flag (first/last year may not be complete)
-    const isPartial = y => {
-      const ms = MONTHS.map((_,m)=>cell[`${y}-${m}`]).filter(Boolean).length;
-      return y===yNow || ms<12;
+    // Cada columna dice qué período cubre (nada de asteriscos ambiguos)
+    const subLbl = txt => `<br/><span style="font-size:7.5px;font-weight:400;letter-spacing:.3px;color:#a99a80;text-transform:none">${txt}</span>`;
+    const yearLabel = y => {
+      if (y > today.getFullYear()) return `${y}${subLbl('Booked')}`;
+      if (y === today.getFullYear()) return `${y}${subLbl(`YTD \u00b7 Jan\u2013${MONTHS[today.getMonth()]}`)}`;
+      if (y === CONDO_START_Y) return `${y}${subLbl(`${MONTHS[CONDO_START_M]}\u2013Dec \u00b7 partial`)}`;
+      return `${y}${subLbl('Full year')}`;
     };
 
     const th = (txt,align) => `<th style="padding:9px 10px;text-align:${align||'left'};font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#8b7355;font-weight:700">${txt}</th>`;
@@ -1976,7 +1979,7 @@ function UnitsScreen() {
       <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
         <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
           ${th('Month')}
-          ${years.map(y=>th(`${y}${isPartial(y)?' *':''}`,'right')).join('')}
+          ${years.map(y=>th(yearLabel(y),'right')).join('')}
         </tr></thead>
         <tbody>
           ${MONTHS.map((ml,m)=>`<tr style="border-top:1px solid #f2ecdf">
@@ -2001,14 +2004,14 @@ function UnitsScreen() {
           </tr>
         </tbody>
       </table>
-      <div class="note">Revenue is recognized in the month of guest check-out. ${years.some(isPartial)?'* Partial year \u2014 not a full twelve months of operation.':''}</div>`;
+      <div class="note">Revenue is recognized in the month of guest check-out. Column headers state the period covered by each year.</div>`;
 
     const expenseTable = !withExpenses ? '' : `
       <div class="section-title">Operating expenses &amp; net operating income</div>
       <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
         <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
           ${th('Expense line')}
-          ${years.map(y=>th(`${y}${isPartial(y)?' *':''}`,'right')).join('')}
+          ${years.map(y=>th(yearLabel(y),'right')).join('')}
         </tr></thead>
         <tbody>
           ${linesUsed.map(l=>`<tr style="border-top:1px solid #f2ecdf">
@@ -2095,6 +2098,7 @@ function UnitsScreen() {
       <strong>NET REVENUE TO OWNER.</strong> All revenue figures in this report are stated <strong>after</strong> sales tax,
       channel fees and the Bocobay management fee have been deducted. Amounts represent the net proceeds actually
       remitted to the owner, not gross booking value. All figures in USD.
+      <br/><strong>${yNow} figures are year-to-date</strong> (January through ${new Date().toLocaleDateString('en-US',{month:'long'})} ${yNow}) and do not represent a full year of operation.
     </div>
 
     <div class="stats">
