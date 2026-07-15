@@ -2016,7 +2016,7 @@ function UnitsScreen() {
           </tr>
         </tbody>
       </table>
-      <div class="note">Expenses are recorded on a cash basis (date of payment) and include this unit\u2019s allocated share of building-wide costs such as condominium fees. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water). Financing costs are excluded: net operating income is stated before debt service.</div>`;
+      <div class="note">Expenses are recorded on a cash basis (date of payment) and include this unit\u2019s allocated share of building-wide costs such as condominium fees. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).</div>`;
 
     const futureTable = future.length===0
       ? '<div class="note" style="font-size:12px">No forward bookings on record.</div>'
