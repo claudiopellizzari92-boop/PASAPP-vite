@@ -1852,6 +1852,120 @@ function UnitsScreen() {
     authFetch(`/tasks/${task.id}`,{method:'DELETE'});
   };
 
+  // Informe financiero de la unidad: ingresos mes a mes + reservas futuras (para venta/inversores)
+  const exportUnitIncomePDF = () => {
+    const name = uname(selU);
+    const hoy = new Date(); hoy.setHours(0,0,0,0);
+    const todayLbl = new Date().toLocaleDateString('es-VE',{year:'numeric',month:'long',day:'numeric'});
+    const money = n => '$'+Math.round(n).toLocaleString('en-US');
+    const parseInc = v => parseFloat(String(v??'').replace(/[^0-9.\-]/g,''))||0;
+    const nightsOf = r => Math.max(1,Math.round((r.checkOut-r.checkIn)/86400000));
+    const MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+
+    const resU = reservations.filter(r=>r.unitId===selU);
+    if (resU.length===0) { alert('Esta unidad no tiene reservas registradas.'); return; }
+
+    // Matriz ingresos por mes (asignados al mes del checkout) × año
+    const years = [...new Set(resU.map(r=>r.checkOut.getFullYear()))].sort();
+    const cell = {}; // `${y}-${m}` → {inc, noches, n}
+    resU.forEach(r=>{
+      const k = `${r.checkOut.getFullYear()}-${r.checkOut.getMonth()}`;
+      if(!cell[k]) cell[k]={inc:0,noches:0,n:0};
+      cell[k].inc += parseInc(r.income);
+      cell[k].noches += nightsOf(r);
+      cell[k].n++;
+    });
+    const yearTotal = y => MESES.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).inc||0),0);
+    const yearNights = y => MESES.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).noches||0),0);
+
+    // KPIs del año en curso
+    const yNow = hoy.getFullYear();
+    const totNow = yearTotal(yNow);
+    const nightsNow = yearNights(yNow);
+    const avgNight = nightsNow ? totNow/nightsNow : 0;
+
+    // Reservas futuras
+    const futuras = resU.filter(r=>r.checkIn>=hoy).sort((a,b)=>a.checkIn-b.checkIn);
+    const futTotal = futuras.reduce((s,r)=>s+parseInc(r.income),0);
+    const fmtD = d => d.toLocaleDateString('es',{day:'2-digit',month:'short',year:'numeric'});
+
+    const tablaIngresos = `
+      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
+        <thead><tr style="background:#f5eee0">
+          <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">Mes</th>
+          ${years.map(y=>`<th style="padding:8px 10px;text-align:right;font-size:11px;color:#1a1208">${y}</th>`).join('')}
+        </tr></thead>
+        <tbody>
+          ${MESES.map((ml,m)=>`<tr style="border-top:1px solid #f0e8d8">
+            <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
+            ${years.map(y=>{const c=cell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${c?'#1a1208':'#ccc'}">${c?money(c.inc):'—'}</td>`;}).join('')}
+          </tr>`).join('')}
+          <tr style="border-top:2px solid #c9963a;background:#faf5ea">
+            <td style="padding:9px 10px;font-size:11px;font-weight:800;color:#c9963a">TOTAL</td>
+            ${years.map(y=>`<td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#c9963a">${money(yearTotal(y))}</td>`).join('')}
+          </tr>
+          <tr>
+            <td style="padding:5px 10px;font-size:9px;color:#999">Noches vendidas</td>
+            ${years.map(y=>`<td style="padding:5px 10px;text-align:right;font-size:10px;color:#999">${yearNights(y)}</td>`).join('')}
+          </tr>
+        </tbody>
+      </table>`;
+
+    const tablaFuturas = futuras.length===0
+      ? '<div style="font-size:12px;color:#999;font-style:italic">Sin reservas futuras registradas.</div>'
+      : `<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8e0d0;border-radius:8px;overflow:hidden">
+        <thead><tr style="background:#f5eee0">
+          ${['Entrada','Salida','Noches','Huésped','Ingreso'].map((h,i)=>`<th style="padding:8px 10px;text-align:${i===4?'right':'left'};font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b7355">${h}</th>`).join('')}
+        </tr></thead>
+        <tbody>
+          ${futuras.map(r=>`<tr style="border-top:1px solid #f0e8d8">
+            <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkIn)}</td>
+            <td style="padding:7px 10px;font-size:11px">${fmtD(r.checkOut)}</td>
+            <td style="padding:7px 10px;font-size:11px">${nightsOf(r)}</td>
+            <td style="padding:7px 10px;font-size:11px">${r.guest||''}</td>
+            <td style="padding:7px 10px;font-size:12px;text-align:right;font-weight:700">${money(parseInc(r.income))}</td>
+          </tr>`).join('')}
+          <tr style="border-top:2px solid #2d6e4e;background:#f0f7f2">
+            <td colspan="4" style="padding:9px 10px;font-size:11px;font-weight:800;color:#2d6e4e">INGRESO FUTURO COMPROMETIDO (${futuras.length} reservas)</td>
+            <td style="padding:9px 10px;text-align:right;font-size:13px;font-weight:800;color:#2d6e4e">${money(futTotal)}</td>
+          </tr>
+        </tbody>
+      </table>`;
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <title>Informe de ingresos ${name}</title>
+    <style>
+      body{font-family:Georgia,serif;max-width:800px;margin:0 auto;padding:32px;color:#1a1208;background:#fdf8f0}
+      h1{font-size:28px;margin:0 0 4px}
+      .sub{font-size:13px;color:#999;margin-bottom:24px}
+      .section-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#c9963a;margin:24px 0 10px;padding-bottom:6px;border-bottom:2px solid #c9963a40}
+      .stats{display:flex;gap:12px;margin-bottom:8px}
+      .stat{background:#fff;border:1px solid #e8e0d0;border-radius:8px;padding:12px 16px;text-align:center;flex:1}
+      .stat-n{font-size:22px;font-weight:800;color:#c9963a}
+      .stat-l{font-size:9px;color:#999;text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+      @media print{body{padding:16px}}
+    </style></head><body>
+    <h1>${name} — Informe de ingresos</h1>
+    <div class="sub">Generado el ${todayLbl} · Porta Al Sole Condos</div>
+    <div class="stats">
+      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Ingresos ${yNow}</div></div>
+      <div class="stat"><div class="stat-n">${nightsNow}</div><div class="stat-l">Noches ${yNow}</div></div>
+      <div class="stat"><div class="stat-n">${avgNight?'$'+Math.round(avgNight):'—'}</div><div class="stat-l">Promedio/noche</div></div>
+      <div class="stat"><div class="stat-n">${money(futTotal)}</div><div class="stat-l">Futuro comprometido</div></div>
+    </div>
+    <div class="section-title">Ingresos por mes</div>
+    ${tablaIngresos}
+    <div style="font-size:9px;color:#999;margin-top:6px;font-style:italic">Los ingresos se asignan al mes de salida (checkout) de cada reserva.</div>
+    <div class="section-title">Reservas futuras</div>
+    ${tablaFuturas}
+    </body></html>`;
+
+    const w = window.open('','_blank');
+    w.document.write(html);
+    w.document.close();
+    setTimeout(()=>w.print(),500);
+  };
+
   const exportUnitPDF = () => {
     const allTasksUnit = tasks.filter(t=>t.unitId===selU);
     const active = allTasksUnit.filter(t=>t.status!=='completado');
@@ -2016,6 +2130,7 @@ function UnitsScreen() {
                 })()}
               </div>
               <div style={{display:'flex',gap:6}}>
+                {isAdmin&&<button onClick={exportUnitIncomePDF} title="Informe de ingresos para venta/inversores" style={{background:'rgba(45,110,78,.12)',color:'var(--done)',border:'1px solid rgba(45,110,78,.3)',borderRadius:8,padding:'7px 10px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>💰 PDF</button>}
                 {isAdmin&&<button onClick={exportUnitPDF} style={{background:'rgba(201,150,58,.15)',color:'var(--gold)',border:'1px solid rgba(201,150,58,.3)',borderRadius:8,padding:'7px 10px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>PDF</button>}
                 <button onClick={()=>setShowNew(true)} style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'7px 11px',fontSize:11,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
                   <span style={{fontSize:14,lineHeight:1}}>+</span> Tarea
