@@ -1922,12 +1922,13 @@ function UnitsScreen() {
     const cell = {};
     resU.forEach(r=>{
       const k = `${r.checkOut.getFullYear()}-${r.checkOut.getMonth()}`;
-      if(!cell[k]) cell[k]={inc:0,nights:0,n:0};
-      cell[k].inc += parseInc(r.income);
-      cell[k].nights += nightsOf(r);
-      cell[k].n++;
+      if(!cell[k]) cell[k]={inc:0,nights:0,n:0,fut:0,futNights:0};
+      const fut = r.checkOut > today; // la estadía todavía no terminó → ingreso no realizado
+      if (fut) { cell[k].fut += parseInc(r.income); cell[k].futNights += nightsOf(r); }
+      else     { cell[k].inc += parseInc(r.income); cell[k].nights  += nightsOf(r); cell[k].n++; }
     });
     const yearTotal  = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).inc||0),0);
+    const yearFut    = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).fut||0),0);
     const yearNights = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).nights||0),0);
 
     // Expense matrix: line item x year
@@ -1959,7 +1960,8 @@ function UnitsScreen() {
     const occNow = occOf(yNow);
 
     // Forward bookings
-    const future = resU.filter(r=>r.checkIn>=today).sort((a,b)=>a.checkIn-b.checkIn);
+    // Forward bookings: estadías aún no completadas (mismo criterio que las celdas verdes)
+    const future = resU.filter(r=>r.checkOut>today).sort((a,b)=>a.checkIn-b.checkIn);
     const futTotal = future.reduce((s,r)=>s+parseInc(r.income),0);
     const futNights = future.reduce((s,r)=>s+nightsOf(r),0);
     const fmtD = d => d.toLocaleDateString('en-US',{day:'2-digit',month:'short',year:'numeric'});
@@ -1975,6 +1977,15 @@ function UnitsScreen() {
 
     const th = (txt,align) => `<th style="padding:9px 10px;text-align:${align||'left'};font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#8b7355;font-weight:700">${txt}</th>`;
 
+    const GRN = '#2d6e4e';
+    const revCell = (y,m) => {
+      const c = cell[`${y}-${m}`];
+      if (!c || (!c.inc && !c.fut)) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:#d5cdbb">\u2014</td>`;
+      if (c.inc && c.fut) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:#1a1208;line-height:1.35">${money(c.inc)}<br/><span style="font-size:10px;color:${GRN};font-weight:700">+${money(c.fut)}</span></td>`;
+      if (c.fut) return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${GRN};font-weight:700">${money(c.fut)}</td>`;
+      return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:#1a1208">${money(c.inc)}</td>`;
+    };
+
     const revenueTable = `
       <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
         <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
@@ -1984,15 +1995,19 @@ function UnitsScreen() {
         <tbody>
           ${MONTHS.map((ml,m)=>`<tr style="border-top:1px solid #f2ecdf">
             <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
-            ${years.map(y=>{const c=cell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${c?'#1a1208':'#d5cdbb'}">${c?money(c.inc):'\u2014'}</td>`;}).join('')}
+            ${years.map(y=>revCell(y,m)).join('')}
           </tr>`).join('')}
           <tr style="border-top:2px solid #c9963a;background:#fbf6ec">
-            <td style="padding:10px;font-size:10px;font-weight:800;color:#c9963a;letter-spacing:.5px">TOTAL NET REVENUE</td>
+            <td style="padding:10px;font-size:10px;font-weight:800;color:#c9963a;letter-spacing:.5px">REALIZED NET REVENUE</td>
             ${years.map(y=>`<td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:#c9963a">${money(yearTotal(y))}</td>`).join('')}
           </tr>
+          ${years.some(y=>yearFut(y))?`<tr style="background:#f2f8f4;border-top:1px solid #d8e8de">
+            <td style="padding:8px 10px;font-size:10px;font-weight:800;color:${GRN};letter-spacing:.5px">+ CONFIRMED FORWARD BOOKINGS</td>
+            ${years.map(y=>`<td style="padding:8px 10px;text-align:right;font-size:12px;font-weight:800;color:${yearFut(y)?GRN:'#d5cdbb'}">${yearFut(y)?'+'+money(yearFut(y)):'\u2014'}</td>`).join('')}
+          </tr>`:''}
           <tr style="border-top:1px solid #f2ecdf">
-            <td style="padding:6px 10px;font-size:10px;color:#8b7355">Nights sold</td>
-            ${years.map(y=>`<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${yearNights(y)}</td>`).join('')}
+            <td style="padding:6px 10px;font-size:10px;color:#8b7355">Nights sold (realized)</td>
+            ${years.map(y=>`<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${yearNights(y)||'\u2014'}</td>`).join('')}
           </tr>
           <tr>
             <td style="padding:6px 10px;font-size:10px;color:#8b7355">Occupancy</td>
@@ -2004,7 +2019,8 @@ function UnitsScreen() {
           </tr>
         </tbody>
       </table>
-      <div class="note">Revenue is recognized in the month of guest check-out. Column headers state the period covered by each year.</div>`;
+      <div class="note">Revenue is recognized in the month of guest check-out. Column headers state the period covered by each year.
+      Figures in <span style="color:${GRN};font-weight:700">green</span> are confirmed bookings whose stay has not yet been completed; they are not included in realized revenue, occupancy or ADR.</div>`;
 
     const expenseTable = !withExpenses ? '' : `
       <div class="section-title">Operating expenses &amp; net operating income</div>
@@ -2102,7 +2118,7 @@ function UnitsScreen() {
     </div>
 
     <div class="stats">
-      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Net revenue ${yNow} YTD</div></div>
+      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Realized net revenue ${yNow} YTD</div></div>
       <div class="stat"><div class="stat-n">${occNow?occNow.toFixed(0)+'%':'\u2014'}</div><div class="stat-l">Occupancy ${yNow} YTD</div></div>
       <div class="stat"><div class="stat-n">${adr?money(adr):'\u2014'}</div><div class="stat-l">Average daily rate</div></div>
       <div class="stat"><div class="stat-n">${money(futTotal)}</div><div class="stat-l">Confirmed forward bookings</div></div>
