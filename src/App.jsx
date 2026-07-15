@@ -1868,7 +1868,6 @@ function UnitsScreen() {
 
     // Sync dialogs first (they keep the click gesture alive)
     const withExpenses = confirm('Include this unit\u2019s EXPENSES in the report?\n\nOK = revenue, expenses and net income\nCancel = revenue only');
-    const preparedFor = (prompt('Prepared for (optional \u2014 buyer or company name):','')||'').trim();
 
     // Open the window BEFORE any await, or the browser blocks it
     const w = window.open('','_blank');
@@ -1881,14 +1880,33 @@ function UnitsScreen() {
         const r = await authFetch('/expenses');
         if (r.ok) {
           const rows = await r.json();
-          expU = rows.filter(x=>x.unit_id===selU).map(x=>({amount:x.amount, date:String(x.date).slice(0,10)}));
+          expU = rows.filter(x=>x.unit_id===selU).map(x=>({
+            amount:x.amount, date:String(x.date).slice(0,10),
+            concept:x.concept||'', category:x.category||''
+          }));
         }
       } catch(e) {}
     }
 
+    // Clasificar cada gasto en un rubro legible para un inversor (en inglés).
+    // El proveedor está al inicio del concepto: "N.V. Elmar · Pago Servicio..."
+    const expLine = e => {
+      const c = String(e.concept||'').toLowerCase();
+      if (/condominio|condominium/.test(c)) return 'Condominium fees';
+      if (/elmar|el[ée]ctric|electric/.test(c)) return 'Electricity';
+      if (/energiebedrijf|\(web\)|water/.test(c)) return 'Water';
+      if (/\bgas\b|gas supply/.test(c)) return 'Gas';
+      if (/limpieza|lavander|cleaning|laundry/.test(c)) return 'Cleaning & laundry';
+      if (/internet|wifi|cable|setar/.test(c)) return 'Internet & TV';
+      return 'Maintenance, repairs & other';
+    };
+    const LINE_ORDER = ['Condominium fees','Electricity','Water','Gas','Internet & TV','Cleaning & laundry','Maintenance, repairs & other'];
+    // El pago de capital del préstamo NO es gasto operativo: se excluye del NOI
+    const expOp = expU.filter(e=>e.category!=='préstamo');
+
     // Revenue matrix: month x year (revenue booked to the checkout month)
     const incYears = [...new Set(resU.map(r=>r.checkOut.getFullYear()))];
-    const expYears = [...new Set(expU.map(x=>parseInt(x.date.slice(0,4))))];
+    const expYears = [...new Set(expOp.map(x=>parseInt(x.date.slice(0,4))))];
     const years = [...new Set([...incYears, ...(withExpenses?expYears:[])])].sort();
     const cell = {};
     resU.forEach(r=>{
@@ -1901,13 +1919,15 @@ function UnitsScreen() {
     const yearTotal  = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).inc||0),0);
     const yearNights = y => MONTHS.reduce((s,_,m)=>s+((cell[`${y}-${m}`]||{}).nights||0),0);
 
-    // Expense matrix
-    const gcell = {};
-    expU.forEach(x=>{
-      const y = parseInt(x.date.slice(0,4)), m = parseInt(x.date.slice(5,7))-1;
-      gcell[`${y}-${m}`] = (gcell[`${y}-${m}`]||0) + x.amount;
+    // Expense matrix: line item x year
+    const gcell = {}; // `${line}|${y}` → total
+    expOp.forEach(x=>{
+      const y = parseInt(x.date.slice(0,4));
+      const k = `${expLine(x)}|${y}`;
+      gcell[k] = (gcell[k]||0) + x.amount;
     });
-    const yearExp = y => MONTHS.reduce((s,_,m)=>s+(gcell[`${y}-${m}`]||0),0);
+    const yearExp = y => LINE_ORDER.reduce((s,l)=>s+(gcell[`${l}|${y}`]||0),0);
+    const linesUsed = LINE_ORDER.filter(l=>years.some(y=>gcell[`${l}|${y}`]));
 
     // Occupancy: nights sold / days elapsed in that year (full year for past years)
     const daysInYear = y => ((y%4===0&&y%100!==0)||y%400===0) ? 366 : 365;
@@ -1971,28 +1991,32 @@ function UnitsScreen() {
       <div class="note">Revenue is recognized in the month of guest check-out. ${years.some(isPartial)?'* Partial year \u2014 not a full twelve months of operation.':''}</div>`;
 
     const expenseTable = !withExpenses ? '' : `
-      <div class="section-title">Operating expenses &amp; net income</div>
+      <div class="section-title">Operating expenses &amp; net operating income</div>
       <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5ddcb">
         <thead><tr style="background:#f7f1e4;border-bottom:1px solid #e5ddcb">
-          ${th('Month')}
-          ${years.map(y=>th(String(y),'right')).join('')}
+          ${th('Expense line')}
+          ${years.map(y=>th(`${y}${isPartial(y)?' *':''}`,'right')).join('')}
         </tr></thead>
         <tbody>
-          ${MONTHS.map((ml,m)=>`<tr style="border-top:1px solid #f2ecdf">
-            <td style="padding:7px 10px;font-size:11px;font-weight:700;color:#8b7355">${ml}</td>
-            ${years.map(y=>{const g=gcell[`${y}-${m}`];return `<td style="padding:7px 10px;text-align:right;font-size:12px;color:${g?'#9c3030':'#d5cdbb'}">${g?'('+money(g).slice(1)+')':'\u2014'}</td>`;}).join('')}
+          ${linesUsed.map(l=>`<tr style="border-top:1px solid #f2ecdf">
+            <td style="padding:8px 10px;font-size:11px;font-weight:700;color:#5a4a35">${l}</td>
+            ${years.map(y=>{const g=gcell[`${l}|${y}`];return `<td style="padding:8px 10px;text-align:right;font-size:12px;color:${g?'#9c3030':'#d5cdbb'}">${g?'('+money(g).slice(1)+')':'\u2014'}</td>`;}).join('')}
           </tr>`).join('')}
           <tr style="border-top:2px solid #9c3030;background:#fbf2f2">
-            <td style="padding:10px;font-size:10px;font-weight:800;color:#9c3030;letter-spacing:.5px">TOTAL EXPENSES</td>
+            <td style="padding:10px;font-size:10px;font-weight:800;color:#9c3030;letter-spacing:.5px">TOTAL OPERATING EXPENSES</td>
             ${years.map(y=>`<td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:#9c3030">(${money(yearExp(y)).slice(1)})</td>`).join('')}
           </tr>
           <tr style="border-top:2px solid #2d6e4e;background:#f2f8f4">
-            <td style="padding:10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">NET OPERATING INCOME</td>
-            ${years.map(y=>{const n=yearTotal(y)-yearExp(y);return `<td style="padding:10px;text-align:right;font-size:14px;font-weight:800;color:${n>=0?'#2d6e4e':'#9c3030'}">${n<0?'('+money(-n).slice(1)+')':money(n)}</td>`;}).join('')}
+            <td style="padding:11px 10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">NET OPERATING INCOME</td>
+            ${years.map(y=>{const n=yearTotal(y)-yearExp(y);return `<td style="padding:11px 10px;text-align:right;font-size:15px;font-weight:800;color:${n>=0?'#2d6e4e':'#9c3030'}">${n<0?'('+money(-n).slice(1)+')':money(n)}</td>`;}).join('')}
+          </tr>
+          <tr>
+            <td style="padding:6px 10px;font-size:10px;color:#8b7355">Expense ratio</td>
+            ${years.map(y=>{const t=yearTotal(y);return `<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${t?((yearExp(y)/t)*100).toFixed(0)+'%':'\u2014'}</td>`;}).join('')}
           </tr>
         </tbody>
       </table>
-      <div class="note">Expenses are recorded on a cash basis (date of payment) and include this unit\u2019s allocated share of shared costs such as condominium fees.</div>`;
+      <div class="note">Expenses are recorded on a cash basis (date of payment) and include this unit\u2019s allocated share of building-wide costs such as condominium fees. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water). Financing costs are excluded: net operating income is stated before debt service.</div>`;
 
     const futureTable = future.length===0
       ? '<div class="note" style="font-size:12px">No forward bookings on record.</div>'
@@ -2048,7 +2072,6 @@ function UnitsScreen() {
         <div style="font-weight:700;color:#1a1208;font-size:11px;letter-spacing:1px">PORTA AL SOLE CONDOS</div>
         <div>Noord, Aruba</div>
         <div>Report date: ${todayLbl}</div>
-        ${preparedFor?`<div>Prepared for: <strong style="color:#1a1208">${preparedFor}</strong></div>`:''}
       </div>
     </div>
 
@@ -2070,17 +2093,9 @@ function UnitsScreen() {
 
     <div class="section-title">Net revenue by month</div>
     ${revenueTable}
-    ${expenseTable}
     <div class="section-title">Forward bookings</div>
     ${futureTable}
-
-    <div class="foot">
-      <strong>Confidential.</strong> This report was prepared from the owner\u2019s booking and accounting records and is provided
-      for informational purposes only. Past performance is not a guarantee of future results. Figures are unaudited and may
-      differ from year-end financial statements. This document does not constitute an offer to sell or a solicitation of an
-      offer to buy any property, nor investment, tax or legal advice. Recipients should perform their own due diligence.
-      <br/>Porta Al Sole Condos \u00b7 Noord, Aruba \u00b7 Generated ${todayLbl}
-    </div>
+    ${expenseTable}
     </body></html>`;
 
     w.document.open();
