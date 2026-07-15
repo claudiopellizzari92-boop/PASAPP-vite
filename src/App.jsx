@@ -2860,7 +2860,7 @@ function MeasDetailModal({ meas, type, unit2, measurements, uname, authFetch, on
 
 /* RECORDS SCREEN */
 function RecordsScreen() {
-  const { user, authFetch, measurements:globalM, measFetching, fetchMeasurements, reloadMeasurements, setMeasurements } = useAuth();
+  const { user, authFetch, measurements:globalM, measFetching, fetchMeasurements, reloadMeasurements, setMeasurements, reservations } = useAuth();
   const isAdmin = user?.username === 'admin';
   const measurements = globalM || [];
   const loading = globalM === null;
@@ -2951,25 +2951,70 @@ function RecordsScreen() {
   const load = useCallback(()=>{ reloadMeasurements(); },[reloadMeasurements]);
 
   // ── Derived data by view mode ─────────────────────────────────
+  // Noches ocupadas de una unidad dentro de una semana ISO (YYYY-Www)
+  const weekRange = (ws) => {
+    const [yr, wn] = ws.split('-W').map(Number);
+    const jan4 = new Date(Date.UTC(yr, 0, 4));
+    const monday = new Date(jan4);
+    monday.setUTCDate(jan4.getUTCDate() - ((jan4.getUTCDay()||7) - 1) + (wn - 1) * 7);
+    const sunday = new Date(monday); sunday.setUTCDate(monday.getUTCDate() + 7);
+    return { from: monday, to: sunday };
+  };
+  const nightsInWeek = (uid, ws) => {
+    const { from, to } = weekRange(ws);
+    let n = 0;
+    (reservations||[]).forEach(r=>{
+      if (r.unitId !== uid) return;
+      const a = Math.max(from.getTime(), r.checkIn.getTime());
+      const b = Math.min(to.getTime(), r.checkOut.getTime());
+      if (b > a) n += Math.round((b - a) / 86400000);
+    });
+    return Math.min(7, n);
+  };
+
   const getWeekData = () => {
     const ws = getISOWeek(offset);
     const prevWs = getISOWeek(offset + 1);
-    const prev2Ws = getISOWeek(offset + 2);
     const rows = measurements.filter(m => m.type===type && m.week===ws);
+    // Umbral absoluto: por debajo de esto, las variaciones % son ruido
+    const MIN_ABS = type==='agua' ? 3 : 60;    // m³ / kWh
+    // Consumo mínimo que delata actividad con la unidad vacía
+    const MIN_VACIO = type==='agua' ? 2 : 30;
+
     return rows.map(m => {
-      const prev  = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prevWs);
-      const prev2 = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prev2Ws);
+      const prev = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prevWs);
       const consumption = prev != null ? m.value - prev.value : null;
-      let alert = null;
-      if (prev && prev2) {
-        const cC = m.value - prev.value;
-        const cP = prev.value - prev2.value;
-        if (cP > 0 && cC >= 0) {
-          const pct = ((cC - cP) / cP) * 100;
-          if (Math.abs(pct) >= 20) alert = { pct: Math.round(pct), direction: pct > 0 ? 'up' : 'down' };
+      const nights = nightsInWeek(m.unitId, ws);
+
+      // Historial: consumo por noche ocupada de las últimas semanas de esta unidad
+      const hist = [];
+      for (let k = 1; k <= 12; k++) {
+        const wA = getISOWeek(offset + k), wB = getISOWeek(offset + k + 1);
+        const a = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===wA);
+        const b = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===wB);
+        if (a && b) {
+          const c = a.value - b.value;
+          const nn = nightsInWeek(m.unitId, wA);
+          if (c >= 0 && nn > 0) hist.push({ perNight: c / nn });
         }
       }
-      return { ...m, consumption, alert, label: uname(m.unitId), sub: null };
+      const avgPerNight = hist.length >= 3
+        ? hist.reduce((s,h)=>s+h.perNight,0) / hist.length
+        : null;
+
+      let alert = null;
+      if (consumption != null) {
+        if (nights === 0 && consumption >= MIN_VACIO) {
+          // La alerta más valiosa: gasta sin nadie adentro
+          alert = { kind:'vacio', direction:'up', text:`Consumo con la unidad vacía · posible fuga` };
+        } else if (nights > 0 && avgPerNight && avgPerNight > 0 && consumption >= MIN_ABS) {
+          const perNight = consumption / nights;
+          const pct = ((perNight - avgPerNight) / avgPerNight) * 100;
+          if (pct >= 60)  alert = { kind:'alto', direction:'up',   text:`${Math.round(pct)}% sobre su promedio por noche ocupada` };
+          else if (pct <= -60) alert = { kind:'bajo', direction:'down', text:`${Math.round(Math.abs(pct))}% bajo su promedio por noche ocupada` };
+        }
+      }
+      return { ...m, consumption, alert, nights, avgPerNight, label: uname(m.unitId), sub: null };
     });
   };
 
@@ -3332,10 +3377,16 @@ function RecordsScreen() {
                         <div className="rrec-name">{row.label}</div>
                         <div className="rrec-consumo">
                           {row.consumption!=null?(
-                            <span style={{fontSize:12,fontWeight:700,color:row.consumption<0?'var(--urgent)':row.consumption>0?'var(--done)':'var(--muted)'}}>
-                              {row.consumption>=0?'+':''}{row.consumption.toFixed(1)}{' '}
-                              <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
-                            </span>
+                            <>
+                              <span style={{fontSize:12,fontWeight:700,color:row.consumption<0?'var(--urgent)':row.consumption>0?'var(--done)':'var(--muted)'}}>
+                                {row.consumption>=0?'+':''}{row.consumption.toFixed(1)}{' '}
+                                <span style={{fontSize:10,fontWeight:400,color:'var(--muted)'}}>{unit2}</span>
+                              </span>
+                              <span style={{fontSize:9,color:'var(--muted)',marginLeft:8}}>
+                                {row.nights===0?'· vacía':`· ${row.nights} noche${row.nights!==1?'s':''}`}
+                                {row.nights>0&&row.consumption>0?` · ${(row.consumption/row.nights).toFixed(1)}/noche`:''}
+                              </span>
+                            </>
                           ):(
                             <span style={{fontSize:10,color:'var(--muted)',fontStyle:'italic'}}>sin ref.</span>
                           )}
@@ -3344,8 +3395,8 @@ function RecordsScreen() {
                       </div>
                       {row.alert&&(
                         <div className="rrec-alert" style={{background:isUp?'var(--urgent-bg)':'rgba(45,110,78,.08)',color:isUp?'var(--urgent)':'var(--done)'}}>
-                          <span>{isUp?'▲':'▼'}</span>
-                          <span>{isUp?'+':''}{row.alert.pct}% consumo vs semana anterior</span>
+                          <span>{row.alert.kind==='vacio'?'💧':isUp?'▲':'▼'}</span>
+                          <span>{row.alert.text}</span>
                         </div>
                       )}
                     </div>
