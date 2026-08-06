@@ -2963,24 +2963,54 @@ function RecordsScreen() {
 
   // ── Derived data by view mode ─────────────────────────────────
   // Noches ocupadas de una unidad dentro de una semana ISO (YYYY-Www)
-  const weekRange = (ws) => {
+  // Aruba es UTC-4 fijo (sin horario de verano) y las reservas se guardan a las
+  // 04:00 UTC = medianoche local. Restar el desfase y truncar da el día correcto
+  // sin importar la zona horaria del navegador.
+  const ARUBA_OFFSET_MS = 4 * 3600000;
+  const arubaDay = (d) => Math.floor((d.getTime() - ARUBA_OFFSET_MS) / 86400000);
+
+  // Lunes de una semana ISO (YYYY-Www) como índice entero de día
+  const weekStartDay = (ws) => {
     const [yr, wn] = ws.split('-W').map(Number);
     const jan4 = new Date(Date.UTC(yr, 0, 4));
     const monday = new Date(jan4);
     monday.setUTCDate(jan4.getUTCDate() - ((jan4.getUTCDay()||7) - 1) + (wn - 1) * 7);
-    const sunday = new Date(monday); sunday.setUTCDate(monday.getUTCDate() + 7);
-    return { from: monday, to: sunday };
+    return Math.floor(monday.getTime() / 86400000);
   };
+
+  // Noches ocupadas de una unidad en una semana ISO.
+  // Una noche pertenece al día del check-in y siguientes, nunca al del check-out:
+  // una reserva del 24 al 28 son 4 noches (24, 25, 26, 27).
+  // Los días se marcan en un Set para que dos reservas solapadas (datos sucios de
+  // Hostaway) no cuenten la misma noche dos veces.
   const nightsInWeek = (uid, ws) => {
-    const { from, to } = weekRange(ws);
-    let n = 0;
+    const start = weekStartDay(ws);
+    const dias = new Set();
     (reservations||[]).forEach(r=>{
       if (r.unitId !== uid) return;
-      const a = Math.max(from.getTime(), r.checkIn.getTime());
-      const b = Math.min(to.getTime(), r.checkOut.getTime());
-      if (b > a) n += Math.round((b - a) / 86400000);
+      const desde = Math.max(start,     arubaDay(r.checkIn));
+      const hasta = Math.min(start + 7, arubaDay(r.checkOut));
+      for (let d = desde; d < hasta; d++) dias.add(d);
     });
-    return Math.min(7, n);
+    return dias.size;
+  };
+
+  // Consumo por noche ocupada. En agua los litros se leen mucho mejor que los m³
+  // ("965 L/noche" vs "0.9/noche"), así que van de métrica principal.
+  const perNight = (consumo, noches) => (consumo==null || !noches) ? null : consumo/noches;
+  const perNightShort = (consumo, noches) => {
+    const v = perNight(consumo, noches);
+    if (v==null || v < 0) return '';
+    return type==='agua'
+      ? `${Math.round(v*1000).toLocaleString('es-ES')} L/noche`
+      : `${v.toFixed(1)} kWh/noche`;
+  };
+  const perNightFull = (consumo, noches) => {
+    const v = perNight(consumo, noches);
+    if (v==null || v < 0) return '';
+    return type==='agua'
+      ? `${Math.round(v*1000).toLocaleString('es-ES')} L/noche · ${v.toFixed(2)} m³`
+      : `${v.toFixed(1)} kWh/noche`;
   };
 
   const getWeekData = () => {
@@ -3066,17 +3096,24 @@ function RecordsScreen() {
     const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
     const wks = weeksInMonth(d.getFullYear(), d.getMonth());
     return UNIT_IDS.map(uid => {
+      const isSpecial = !!SPECIAL[uid];
       const periods = wks.map(ws => {
         const cur  = measurements.find(m=>m.unitId===uid&&m.type===type&&m.week===ws);
         const prevWs = getPrevWeekOf(ws);
         const prev = prevWs ? measurements.find(m=>m.unitId===uid&&m.type===type&&m.week===prevWs) : null;
         const consumption = cur && prev!=null ? cur.value - prev.value : null;
-        return { label: weekLabelShort(ws), value: cur?.value??null, consumption };
+        // Recepción y Áreas Comunes no reciben huéspedes: no se normalizan
+        const nights = isSpecial ? null : nightsInWeek(uid, ws);
+        return { label: weekLabelShort(ws), value: cur?.value??null, consumption, nights };
       }).filter(p => p.value !== null);
       if (!periods.length) return null;
       const total = periods.reduce((s,p)=>p.consumption!=null?s+(p.consumption):s, 0);
       const hasTotal = periods.some(p=>p.consumption!=null);
-      return { uid, unitLabel: uname(uid), periods, total: hasTotal?total:null };
+      // Solo suman las noches de las semanas que aportaron consumo, para que
+      // numerador y denominador cubran exactamente el mismo período.
+      const nights = isSpecial ? null
+        : periods.reduce((s,p)=>p.consumption!=null?s+(p.nights||0):s, 0);
+      return { uid, unitLabel: uname(uid), periods, total: hasTotal?total:null, nights, isSpecial };
     }).filter(Boolean);
   };
 
@@ -3084,21 +3121,30 @@ function RecordsScreen() {
     const MONTHS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
     const year = now.getFullYear() - offset;
     return UNIT_IDS.map(uid => {
+      const isSpecial = !!SPECIAL[uid];
       const periods = Array.from({length:12},(_,mi)=>{
         const wks = weeksInMonth(year, mi);
         const thisMs = measurements.filter(m=>m.unitId===uid&&m.type===type&&wks.includes(m.week));
-        let monthConsumption = null;
+        let monthConsumption = null, monthNights = 0;
         thisMs.forEach(m => {
           const prevWk = getPrevWeekOf(m.week);
           const prev = prevWk ? measurements.find(p=>p.unitId===uid&&p.type===type&&p.week===prevWk) : null;
-          if (prev!=null) monthConsumption = (monthConsumption||0) + (m.value - prev.value);
+          // Cada semana aporta consumo y noches a la vez: si un mes tuvo 4 lecturas
+          // que cubren 28 días, el divisor son esas noches, no los 30 del mes.
+          if (prev!=null) {
+            monthConsumption = (monthConsumption||0) + (m.value - prev.value);
+            if (!isSpecial) monthNights += nightsInWeek(uid, m.week);
+          }
         });
-        return { label: MONTHS[mi], consumption: monthConsumption, hasData: thisMs.length > 0 };
+        return { label: MONTHS[mi], consumption: monthConsumption,
+                 nights: isSpecial ? null : monthNights, hasData: thisMs.length > 0 };
       }).filter(p => p.hasData);
       if (!periods.length) return null;
       const total = periods.reduce((s,p)=>p.consumption!=null?s+p.consumption:s, 0);
       const hasTotal = periods.some(p=>p.consumption!=null);
-      return { uid, unitLabel: uname(uid), periods, total: hasTotal?total:null };
+      const nights = isSpecial ? null
+        : periods.reduce((s,p)=>p.consumption!=null?s+(p.nights||0):s, 0);
+      return { uid, unitLabel: uname(uid), periods, total: hasTotal?total:null, nights, isSpecial };
     }).filter(Boolean);
   };
 
@@ -3200,7 +3246,7 @@ function RecordsScreen() {
         else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)) };
       }
     }
-    return { consumption, alert };
+    return { consumption, alert, nights, isSpecial };
   };
 
   const getMonthExportData = () => {
@@ -3216,8 +3262,9 @@ function RecordsScreen() {
     for (const ws of wks) {
       const wkMeasurements = measurements.filter(m=>m.type===type&&m.week===ws);
       for (const m of wkMeasurements) {
-        const { consumption, alert } = computeAlertForExport(m, ws);
-        exportRows.push({ week: ws, unitLabel: uname(m.unitId), value: m.value, consumption, alert, unit });
+        const { consumption, alert, nights, isSpecial } = computeAlertForExport(m, ws);
+        exportRows.push({ week: ws, unitLabel: uname(m.unitId), value: m.value, consumption,
+                          alert, unit, nights: isSpecial?null:nights, isSpecial });
       }
     }
     return { monthLabel, exportRows, unit, wks };
@@ -3229,10 +3276,16 @@ function RecordsScreen() {
 
   const downloadCSV = () => {
     const { monthLabel, exportRows, unit } = getMonthExportData();
-    const header = `Semana,Unidad,Lectura (${unit}),Consumo (${unit}),Alerta`;
-    const body = exportRows.map(r =>
-      `"${r.week}","${r.unitLabel}",${r.value},${r.consumption!=null?r.consumption.toFixed(1):''},${alertText(r.alert)}`
-    ).join('\n');
+    const perNightUnit = type==='agua' ? 'L/noche' : 'kWh/noche';
+    const header = `Semana,Unidad,Lectura (${unit}),Consumo (${unit}),Noches ocupadas,Consumo por noche (${perNightUnit}),Alerta`;
+    const body = exportRows.map(r => {
+      // Recepción y Áreas Comunes no se normalizan: no reciben huéspedes
+      const noches = r.isSpecial ? 'medidor común' : (r.nights!=null ? r.nights : '');
+      const v = (!r.isSpecial && r.consumption!=null && r.nights>0 && r.consumption>=0)
+        ? (type==='agua' ? Math.round(r.consumption/r.nights*1000) : (r.consumption/r.nights).toFixed(2))
+        : '';
+      return `"${r.week}","${r.unitLabel}",${r.value},${r.consumption!=null?r.consumption.toFixed(1):''},"${noches}",${v},${alertText(r.alert)}`;
+    }).join('\n');
     const csv = `Porta Al Sole - Registros de ${type}\nMes: ${monthLabel}\nTipo: ${type==='agua'?'Agua (m³)':'Luz (kWh)'}\n\n${header}\n${body}`;
     const blob = new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'});
     const a = document.createElement('a');
@@ -3244,7 +3297,8 @@ function RecordsScreen() {
   const downloadPDF = () => {
     const { monthLabel, exportRows, unit, wks } = getMonthExportData();
     const th = (txt, align='left') => `<th style="padding:7px 10px;text-align:${align};font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#8b7355;border-bottom:2px solid #c9963a;white-space:nowrap">${txt}</th>`;
-    const headers = `${th('Semana')}${th('Unidad')}${th('Lectura',  'right')}${th('Consumo','right')}${th('Alerta','center')}`;
+    const perNightUnit = type==='agua' ? 'L/noche' : 'kWh/noche';
+    const headers = `${th('Semana')}${th('Unidad')}${th('Lectura',  'right')}${th('Consumo','right')}${th('Noches','right')}${th(perNightUnit,'right')}${th('Alerta','center')}`;
 
     // Group rows by week for visual separation
     let tableRows = '';
@@ -3252,7 +3306,7 @@ function RecordsScreen() {
     const sevColors = { red:'#b83232', amber:'#a8762a', low:'#2d6e4e' };
     for (const r of exportRows) {
       const weekHeader = r.week !== lastWeek
-        ? `<tr><td colspan="5" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:#c9963a;letter-spacing:1px;text-transform:uppercase;background:#faf5ec;border-bottom:1px solid #e4d9c8">${r.week}</td></tr>`
+        ? `<tr><td colspan="7" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:#c9963a;letter-spacing:1px;text-transform:uppercase;background:#faf5ec;border-bottom:1px solid #e4d9c8">${r.week}</td></tr>`
         : '';
       lastWeek = r.week;
       const cColor = r.consumption!=null ? (r.consumption<0?'#b83232':'#1a1208') : '#8b7355';
@@ -3260,11 +3314,21 @@ function RecordsScreen() {
       const alertCell = r.alert
         ? `<span style="color:${sevColors[sev]};font-weight:700;font-size:11px">${r.alert.kind==='vacio'?'💧 Posible fuga':`${r.alert.direction==='up'?'▲':'▼'} ${r.alert.pct}%`}</span>`
         : '<span style="color:#ccc">—</span>';
+      const nochesCell = r.isSpecial ? 'común'
+        : r.nights==null ? '<span style="color:#ccc">—</span>'
+        : r.nights===0 ? 'vacía' : String(r.nights);
+      const perNightCell = (!r.isSpecial && r.consumption!=null && r.nights>0 && r.consumption>=0)
+        ? (type==='agua'
+            ? Math.round(r.consumption/r.nights*1000).toLocaleString('es-ES')
+            : (r.consumption/r.nights).toFixed(2))
+        : '<span style="color:#ccc">—</span>';
       tableRows += `${weekHeader}<tr style="background:#fff">
         <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;font-size:11px;color:#8b7355">${r.week}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;font-weight:600;font-size:12px">${r.unitLabel}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;text-align:right;font-size:12px">${r.value} ${r.unit}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;text-align:right;color:${cColor};font-weight:700;font-size:12px">${r.consumption!=null?(r.consumption>=0?'+':'')+r.consumption.toFixed(1)+' '+r.unit:'Sin ref.'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;text-align:right;font-size:11px;color:${r.isSpecial?'#8b7355':r.nights===0?'#b83232':'#1a1208'}">${nochesCell}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;text-align:right;font-size:12px;font-weight:600;color:#5a4a35">${perNightCell}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f0e8da;text-align:center">${alertCell}</td>
       </tr>`;
     }
@@ -3477,7 +3541,7 @@ function RecordsScreen() {
                               <span style={{fontSize:9,color:'var(--muted)'}}>
                                 {row.isSpecial ? 'medidor común'
                                   : row.nights===0?'vacía':`${row.nights} noche${row.nights!==1?'s':''}`}
-                                {!row.isSpecial&&row.nights>0&&row.consumption>0?` · ${(row.consumption/row.nights).toFixed(1)}/noche`:''}
+                                {!row.isSpecial&&row.nights>0&&row.consumption>0?` · ${perNightShort(row.consumption,row.nights)}`:''}
                               </span>
                               {row.alert&&(
                                 <span style={{...sevStyle,display:'inline-flex',alignItems:'center',gap:3,fontSize:9.5,fontWeight:700,padding:'2px 7px',borderRadius:20,whiteSpace:'nowrap'}}>
@@ -3530,6 +3594,15 @@ function RecordsScreen() {
                             promedio {avg.toFixed(1)} {unit2} · {bars.length} {viewMode==='month'?'semanas':'meses'}
                           </div>
                         )}
+                        {grp.isSpecial ? (
+                          <div style={{fontSize:9.5,color:'var(--muted)',marginTop:1}}>medidor común</div>
+                        ) : grp.nights>0 && grp.total!=null && grp.total>0 ? (
+                          <div style={{fontSize:9.5,color:'var(--gold)',marginTop:1,fontWeight:600}}>
+                            {perNightFull(grp.total, grp.nights)} · {grp.nights} noche{grp.nights!==1?'s':''}
+                          </div>
+                        ) : grp.total!=null && grp.nights===0 ? (
+                          <div style={{fontSize:9.5,color:'var(--muted)',marginTop:1,fontStyle:'italic'}}>sin ocupación en el período</div>
+                        ) : null}
                       </div>
                       <div style={{textAlign:'right',flexShrink:0}}>
                         {grp.total!=null?(
@@ -3548,7 +3621,14 @@ function RecordsScreen() {
                       const neg   = p.consumption<0;
                       return (
                         <div key={j} style={{display:'flex',alignItems:'center',gap:9,padding:'7px 13px',borderBottom:j<grp.periods.length-1?'1px solid var(--border)':'none'}}>
-                          <div style={{width:46,flexShrink:0,fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{p.label}</div>
+                          <div style={{width:46,flexShrink:0}}>
+                            <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{p.label}</div>
+                            {p.nights!=null&&p.consumption!=null&&(
+                              <div style={{fontSize:8.5,color:p.nights===0?'var(--urgent)':'var(--muted)',opacity:p.nights===0?.9:.65}}>
+                                {p.nights===0?'vacía':`${p.nights} noche${p.nights!==1?'s':''}`}
+                              </div>
+                            )}
+                          </div>
                           <div style={{flex:1,minWidth:24,height:7,background:'var(--border)',borderRadius:4,overflow:'hidden'}}>
                             {p.consumption!=null&&(
                               <div style={{height:'100%',width:w+'%',borderRadius:4,transition:'width .35s',
