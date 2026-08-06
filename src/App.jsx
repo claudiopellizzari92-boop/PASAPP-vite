@@ -2978,22 +2978,28 @@ function RecordsScreen() {
     return Math.floor(monday.getTime() / 86400000);
   };
 
-  // Noches ocupadas de una unidad en una semana ISO.
+  // Noches ocupadas de una unidad en los 7 días que arrancan en startDay.
   // Una noche pertenece al día del check-in y siguientes, nunca al del check-out:
   // una reserva del 24 al 28 son 4 noches (24, 25, 26, 27).
   // Los días se marcan en un Set para que dos reservas solapadas (datos sucios de
   // Hostaway) no cuenten la misma noche dos veces.
-  const nightsInWeek = (uid, ws) => {
-    const start = weekStartDay(ws);
+  const nightsFromDay = (uid, startDay) => {
     const dias = new Set();
     (reservations||[]).forEach(r=>{
       if (r.unitId !== uid) return;
-      const desde = Math.max(start,     arubaDay(r.checkIn));
-      const hasta = Math.min(start + 7, arubaDay(r.checkOut));
+      const desde = Math.max(startDay,     arubaDay(r.checkIn));
+      const hasta = Math.min(startDay + 7, arubaDay(r.checkOut));
       for (let d = desde; d < hasta; d++) dias.add(d);
     });
     return dias.size;
   };
+
+  // Noches que corresponden al CONSUMO de una lectura etiquetada como semana ws.
+  // La toma se hace el lunes de ws y se le resta la del lunes de ws-1, así que el
+  // consumo cubre los días de la semana ANTERIOR. Contar las noches de ws dejaría
+  // el numerador y el denominador desfasados una semana (una unidad recién
+  // desocupada aparecería como fuga).
+  const nightsForReading = (uid, ws) => nightsFromDay(uid, weekStartDay(ws) - 7);
 
   // Consumo por noche ocupada. En agua los litros se leen mucho mejor que los m³
   // ("965 L/noche" vs "0.9/noche"), así que van de métrica principal.
@@ -3025,7 +3031,7 @@ function RecordsScreen() {
     return rows.map(m => {
       const prev = measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prevWs);
       const consumption = prev != null ? m.value - prev.value : null;
-      const nights = nightsInWeek(m.unitId, ws);
+      const nights = nightsForReading(m.unitId, ws);
 
       // Historial: consumo por noche ocupada de las últimas semanas de esta unidad
       const hist = [];
@@ -3037,7 +3043,7 @@ function RecordsScreen() {
         if (a && b) {
           const c = a.value - b.value;
           if (c >= 0) spark.push(c);
-          const nn = nightsInWeek(m.unitId, wA);
+          const nn = nightsForReading(m.unitId, wA);
           if (c >= 0 && nn > 0) hist.push({ perNight: c / nn });
         }
       }
@@ -3103,7 +3109,7 @@ function RecordsScreen() {
         const prev = prevWs ? measurements.find(m=>m.unitId===uid&&m.type===type&&m.week===prevWs) : null;
         const consumption = cur && prev!=null ? cur.value - prev.value : null;
         // Recepción y Áreas Comunes no reciben huéspedes: no se normalizan
-        const nights = isSpecial ? null : nightsInWeek(uid, ws);
+        const nights = isSpecial ? null : nightsForReading(uid, ws);
         return { label: weekLabelShort(ws), value: cur?.value??null, consumption, nights };
       }).filter(p => p.value !== null);
       if (!periods.length) return null;
@@ -3133,7 +3139,7 @@ function RecordsScreen() {
           // que cubren 28 días, el divisor son esas noches, no los 30 del mes.
           if (prev!=null) {
             monthConsumption = (monthConsumption||0) + (m.value - prev.value);
-            if (!isSpecial) monthNights += nightsInWeek(uid, m.week);
+            if (!isSpecial) monthNights += nightsForReading(uid, m.week);
           }
         });
         return { label: MONTHS[mi], consumption: monthConsumption,
@@ -3206,7 +3212,7 @@ function RecordsScreen() {
     const prevWs = getPrevWeekOf(ws);
     const prev = prevWs ? measurements.find(p=>p.unitId===m.unitId&&p.type===type&&p.week===prevWs) : null;
     const consumption = prev!=null ? m.value - prev.value : null;
-    const nights = nightsInWeek(m.unitId, ws);
+    const nights = nightsForReading(m.unitId, ws);
     const isSpecial = !!SPECIAL[m.unitId];
 
     // Cadena de semanas anteriores a ws para reconstruir el historial
@@ -3222,7 +3228,7 @@ function RecordsScreen() {
       if (a && b) {
         const c = a.value - b.value;
         if (c >= 0) spark.push(c);
-        const nn = nightsInWeek(m.unitId, wA);
+        const nn = nightsForReading(m.unitId, wA);
         if (c >= 0 && nn > 0) hist.push({ perNight: c / nn });
       }
     }
