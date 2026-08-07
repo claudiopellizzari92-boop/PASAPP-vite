@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import './styles.css';
 
@@ -6164,6 +6163,8 @@ function InvoicesScreen() {
   const [err,     setErr]     = useState('');
   const [okMsg,   setOkMsg]   = useState('');
   const [lightbox,setLightbox]= useState(null);
+  const [fileType,setFileType]= useState('image'); // 'image' | 'pdf'
+  const [fileName,setFileName]= useState('');
   const [filtro,  setFiltro]  = useState('all'); // 'all' | 'mbl' | 'condominio'
   const [dlBusy,  setDlBusy]  = useState('');
 
@@ -6184,17 +6185,49 @@ function InvoicesScreen() {
 
   useEffect(()=>{ load(); },[load]);
 
-  const limpiar = () => { setPhoto(null); setVendor(''); setDestino(''); setAmount(''); setNotes(''); setErr(''); };
+  const limpiar = () => { setPhoto(null); setFileType('image'); setFileName(''); setVendor(''); setDestino(''); setAmount(''); setNotes(''); setErr(''); };
+
+  // Cloudinary guarda el PDF original y sirve cualquier pagina como imagen
+  // cambiando la URL. Asi la miniatura y el archivo mensual no necesitan
+  // ninguna libreria de PDF en el navegador.
+  const pdfPagina = (url, pagina=1, ancho=1000) =>
+    String(url).replace('/upload/', `/upload/pg_${pagina},f_jpg,w_${ancho},q_auto/`);
+
+  // Miniatura y visor: para PDF sale de la pagina 1; para imagen, la propia foto
+  const miniatura = inv => inv.fileType==='pdf' ? pdfPagina(inv.photoUrl,1,300) : inv.photoUrl;
+
+  const leerArchivo = file => new Promise(res=>{
+    const rd = new FileReader();
+    rd.onload  = e => res(e.target.result);
+    rd.onerror = () => res(null);
+    rd.readAsDataURL(file);
+  });
 
   const tomarFoto = async (file) => {
     if (!file) return;
     setErr('');
-    // Desde la galería se puede elegir cualquier cosa: avisar acá en vez de
-    // dejar que el servidor lo rechace después de subirlo.
-    if (!file.type || !file.type.startsWith('image/')) {
-      setErr('Solo se pueden subir imágenes (JPG, PNG, HEIC). Si la factura es un PDF, sacale una captura.');
+    const esPdf = file.type === 'application/pdf';
+
+    if (!esPdf && !(file.type||'').startsWith('image/')) {
+      setErr('Solo se pueden subir imágenes o PDF.');
       return;
     }
+    // El body de la API admite 20 MB, y base64 infla el archivo un tercio.
+    if (file.size > 13 * 1024 * 1024) {
+      setErr('El archivo pesa más de 13 MB y no se puede subir. Probá con una versión más liviana.');
+      return;
+    }
+
+    if (esPdf) {
+      // Un PDF de proveedor es texto: pesa poco y comprimirlo no aplica.
+      const data = await leerArchivo(file);
+      if (!data) { setErr('No se pudo leer el PDF. Probá de nuevo.'); return; }
+      setPhoto(data);
+      setFileType('pdf');
+      setFileName(file.name || 'factura.pdf');
+      return;
+    }
+
     // 1600px en vez de los 1200 de las tareas: la letra chica de un recibo
     // necesita más resolución para quedar legible.
     const data = await compressImage(file, 1600, 0.82);
@@ -6203,6 +6236,8 @@ function InvoicesScreen() {
       return;
     }
     setPhoto(data);
+    setFileType('image');
+    setFileName('');
   };
 
   const guardar = async () => {
@@ -6268,7 +6303,16 @@ function InvoicesScreen() {
         return await new Promise(res=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.readAsDataURL(blob); });
       } catch { return null; }
     };
-    const conFoto = await Promise.all(facturas.map(async f=>({ ...f, b64: await toBase64(f.photoUrl) })));
+    // Un PDF de 3 páginas aporta 3 imágenes: así la administración recibe la
+    // factura completa en un solo documento, sin tener que abrir adjuntos.
+    const paginasDe = inv => inv.fileType==='pdf'
+      ? Array.from({length: Math.max(1, inv.pageCount||1)}, (_,i)=>pdfPagina(inv.photoUrl, i+1, 1200))
+      : [inv.photoUrl];
+
+    const conFoto = await Promise.all(facturas.map(async f=>({
+      ...f,
+      b64s: (await Promise.all(paginasDe(f).map(toBase64))).filter(Boolean),
+    })));
 
     const totalAwg = facturas.reduce((s,f)=>s+(Number(f.amountAwg)||0),0);
     const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -6286,13 +6330,13 @@ function InvoicesScreen() {
       <div class="card">
         <div class="card-h">
           <span class="num">#${i+1}</span>
-          <span class="ven">${esc(f.vendor)}</span>
+          <span class="ven">${esc(f.vendor)}${f.b64s.length>1?` <span class="pg">${f.b64s.length} páginas</span>`:''}</span>
           <span class="amt">${f.amountAwg!=null?fmtAwg(f.amountAwg):''}</span>
         </div>
         ${f.notes?`<div class="note">${esc(f.notes)}</div>`:''}
-        ${f.b64
-          ? `<img src="${f.b64}"/>`
-          : `<div class="miss">No se pudo incrustar la foto. Ver: ${esc(f.photoUrl)}</div>`}
+        ${f.b64s.length
+          ? f.b64s.map((b,j)=>`<img src="${b}"/>${f.b64s.length>1?`<div class="pgl">Página ${j+1} de ${f.b64s.length}</div>`:''}`).join('')
+          : `<div class="miss">No se pudo incrustar el archivo. Ver: ${esc(f.photoUrl)}</div>`}
       </div>`).join('');
 
     const html = `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
@@ -6312,7 +6356,9 @@ function InvoicesScreen() {
   .ven{font-size:14px;font-weight:700;flex:1}
   .amt{font-size:13px;font-weight:800}
   .note{font-size:11px;color:#5a4a35;margin-bottom:7px}
-  .card img{width:100%;max-height:640px;object-fit:contain;border-radius:6px;display:block;background:#f7f2eb}
+  .card img{width:100%;max-height:640px;object-fit:contain;border-radius:6px;display:block;background:#f7f2eb;margin-bottom:4px}
+  .pg{font-size:9px;font-weight:400;color:#8b7355;background:#f7f2eb;border-radius:4px;padding:1px 6px;margin-left:4px}
+  .pgl{font-size:9px;color:#a99a80;text-align:right;margin-bottom:8px}
   .miss{font-size:10px;color:#b83232;word-break:break-all}
   h2{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:#c9963a;margin:26px 0 12px;padding-bottom:6px;border-bottom:1px solid #e4d9c8}
   .foot{margin-top:26px;padding-top:12px;border-top:1px solid #e4d9c8;font-size:9px;color:#a99a80;display:flex;justify-content:space-between}
@@ -6394,14 +6440,14 @@ ${fotos}
                     {/* Sin capture: abre la galería o el explorador de archivos */}
                     <label style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:7,
                       padding:'22px 10px',borderRadius:12,border:'2px dashed var(--border)',cursor:'pointer',background:'var(--bg)'}}>
-                      <span style={{fontSize:30,lineHeight:1}}>🖼️</span>
-                      <span style={{fontSize:13,fontWeight:800,color:'var(--muted)',textAlign:'center'}}>Elegir archivo</span>
-                      <input type="file" accept="image/*" style={{display:'none'}}
+                      <span style={{fontSize:30,lineHeight:1}}>📎</span>
+                      <span style={{fontSize:13,fontWeight:800,color:'var(--muted)',textAlign:'center'}}>PDF o imagen</span>
+                      <input type="file" accept="image/*,application/pdf,.pdf" style={{display:'none'}}
                         onChange={e=>{ tomarFoto(e.target.files[0]); e.target.value=''; }}/>
                     </label>
                   </div>
                   <div style={{fontSize:10,color:'var(--muted)',textAlign:'center',marginTop:9,lineHeight:1.5}}>
-                    Para fotografiarla, apoyala en una superficie plana y con buena luz.
+                    La mayoría de las facturas llegan en PDF: usá «PDF o imagen». La cámara es para los recibos de papel.
                   </div>
                   {err&&(
                     <div style={{background:'var(--urgent-bg)',border:'1px solid var(--urgent)',borderRadius:9,
@@ -6413,9 +6459,20 @@ ${fotos}
               ):(
                 <>
                   <div style={{position:'relative',marginBottom:12}}>
-                    <img src={photo} alt="Factura" onClick={()=>setLightbox(photo)}
-                      style={{width:'100%',maxHeight:220,objectFit:'contain',borderRadius:10,background:'var(--bg)',cursor:'zoom-in',display:'block'}}/>
-                    <button onClick={()=>setPhoto(null)} disabled={busy}
+                    {fileType==='pdf'?(
+                      <div style={{display:'flex',alignItems:'center',gap:12,padding:'18px 14px',borderRadius:10,
+                        background:'var(--bg)',border:'1px solid var(--border)'}}>
+                        <span style={{fontSize:32,lineHeight:1,flexShrink:0}}>📕</span>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:800,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{fileName}</div>
+                          <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>PDF listo para subir · se conserva completo</div>
+                        </div>
+                      </div>
+                    ):(
+                      <img src={photo} alt="Factura" onClick={()=>setLightbox(photo)}
+                        style={{width:'100%',maxHeight:220,objectFit:'contain',borderRadius:10,background:'var(--bg)',cursor:'zoom-in',display:'block'}}/>
+                    )}
+                    <button onClick={()=>{setPhoto(null);setFileType('image');setFileName('');}} disabled={busy}
                       style={{position:'absolute',top:6,right:6,width:28,height:28,borderRadius:'50%',background:'rgba(0,0,0,.65)',
                         border:'none',color:'#fff',fontSize:16,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
                   </div>
@@ -6574,8 +6631,19 @@ ${fotos}
                                   <div key={inv.id} style={{display:'flex',gap:10,alignItems:'flex-start',background:'var(--surface)',
                                     border:'1px solid var(--border)',borderLeft:`3px solid ${destColor(inv.destino)}`,
                                     borderRadius:12,padding:'9px 11px'}}>
-                                    <img src={inv.photoUrl} alt="" loading="lazy" onClick={()=>setLightbox(inv.photoUrl)}
-                                      style={{width:52,height:52,borderRadius:9,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
+                                    <div onClick={()=>inv.fileType==='pdf'
+                                            ? window.open(inv.photoUrl,'_blank')
+                                            : setLightbox(inv.photoUrl)}
+                                      style={{position:'relative',width:52,height:52,flexShrink:0,cursor:'pointer'}}>
+                                      <img src={miniatura(inv)} alt="" loading="lazy"
+                                        style={{width:52,height:52,borderRadius:9,objectFit:'cover',border:'1px solid var(--border)',display:'block',background:'var(--bg)'}}/>
+                                      {inv.fileType==='pdf'&&(
+                                        <span style={{position:'absolute',bottom:-3,right:-3,fontSize:7.5,fontWeight:800,
+                                          background:'var(--urgent)',color:'#fff',borderRadius:4,padding:'1px 4px',letterSpacing:.3}}>
+                                          PDF{inv.pageCount>1?` ${inv.pageCount}p`:''}
+                                        </span>
+                                      )}
+                                    </div>
                                     <div style={{flex:1,minWidth:0}}>
                                       <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.vendor||'(sin proveedor)'}</div>
                                       {inv.amountAwg!=null&&(
