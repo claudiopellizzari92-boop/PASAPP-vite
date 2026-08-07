@@ -6144,6 +6144,233 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+/* INVOICES SCREEN */
+// Archivo de respaldo documental. NO genera gastos: la contabilidad sigue
+// viniendo de QuickBooks. Cada técnico ve solo sus facturas; el admin, todas
+// (el filtro real está en el backend, esto es solo la interfaz).
+function InvoicesScreen() {
+  const { user, authFetch } = useAuth();
+  const isAdmin = user?.username === 'admin';
+  const AWG_USD = 1.78;
+
+  const [list,    setList]    = useState(null); // null = cargando · false = backend sin actualizar
+  const [photo,   setPhoto]   = useState(null);
+  const [vendor,  setVendor]  = useState('');
+  const [amount,  setAmount]  = useState('');
+  const [notes,   setNotes]   = useState('');
+  const [busy,    setBusy]    = useState(false);
+  const [err,     setErr]     = useState('');
+  const [okMsg,   setOkMsg]   = useState('');
+  const [lightbox,setLightbox]= useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await authFetch('/invoices');
+      if (r.status === 404) { setList(false); return; }
+      setList(r.ok ? await r.json() : []);
+    } catch { setList([]); }
+  }, [authFetch]);
+
+  useEffect(()=>{ load(); },[load]);
+
+  const limpiar = () => { setPhoto(null); setVendor(''); setAmount(''); setNotes(''); setErr(''); };
+
+  const tomarFoto = async (file) => {
+    if (!file) return;
+    setErr('');
+    // 1600px en vez de los 1200 de las tareas: la letra chica de un recibo
+    // necesita más resolución para quedar legible.
+    const data = await compressImage(file, 1600, 0.82);
+    if (!data) { setErr('No se pudo procesar la foto. Probá de nuevo.'); return; }
+    setPhoto(data);
+  };
+
+  const guardar = async () => {
+    if (!photo || !vendor.trim()) return;
+    setBusy(true); setErr('');
+    try {
+      const body = { vendor: vendor.trim(), notes: notes.trim(), data: photo };
+      const monto = parseFloat(String(amount).replace(',','.'));
+      if (!isNaN(monto) && monto > 0) body.amountAwg = monto;
+
+      const r = await authFetch('/invoices',{method:'POST',body:JSON.stringify(body)});
+      if (r.ok) {
+        const nueva = await r.json();
+        setList(prev=>[nueva, ...(Array.isArray(prev)?prev:[])]);
+        limpiar();
+        setOkMsg('Factura guardada');
+        setTimeout(()=>setOkMsg(''), 2500);
+      } else {
+        const e = await r.json().catch(()=>({}));
+        setErr(e.error || `Error ${r.status} del servidor`);
+      }
+    } catch {
+      setErr('No se pudo conectar. Revisá la señal e intentá de nuevo.');
+    }
+    setBusy(false);
+  };
+
+  const borrar = async (inv) => {
+    if (!confirm(`¿Borrar la factura de ${inv.vendor}?`)) return;
+    const r = await authFetch(`/invoices/${inv.id}`,{method:'DELETE'});
+    if (r.ok || r.status===204) setList(prev=>prev.filter(x=>x.id!==inv.id));
+    else alert('No se pudo borrar.');
+  };
+
+  const fmtFecha = iso => {
+    try { return new Date(iso).toLocaleDateString('es-VE',{day:'numeric',month:'short',year:'numeric'}); }
+    catch { return String(iso).slice(0,10); }
+  };
+  const fmtAwg = n => 'ƒ'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const fmtUsd = n => '$'+(Number(n)/AWG_USD).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+  const montoNum = parseFloat(String(amount).replace(',','.'));
+  const puedeGuardar = !!photo && !!vendor.trim() && !busy;
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+      <div className="header">
+        <div className="header-title">Facturas</div>
+        <div style={{fontSize:11,color:'rgba(255,255,255,.32)'}}>
+          {Array.isArray(list) ? `${list.length} cargada${list.length!==1?'s':''}` : ''}
+        </div>
+      </div>
+
+      <div className="page">
+        <div style={{padding:'12px 13px 84px',display:'flex',flexDirection:'column',gap:14}}>
+
+          {list===false&&(
+            <div style={{background:'rgba(201,150,58,.06)',border:'1px dashed rgba(201,150,58,.3)',borderRadius:10,padding:'12px 14px',fontSize:11,color:'var(--muted)',lineHeight:1.5}}>
+              ⚙️ Las facturas requieren actualizar el backend (tabla <code>invoices</code> + endpoints).
+            </div>
+          )}
+
+          {/* ── Carga ── */}
+          {list!==false&&(
+            <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'14px'}}>
+              {!photo?(
+                <label style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:8,
+                  padding:'26px 14px',borderRadius:12,border:'2px dashed var(--border)',cursor:'pointer',background:'var(--bg)'}}>
+                  <span style={{fontSize:34,lineHeight:1}}>📄</span>
+                  <span style={{fontSize:14,fontWeight:800,color:'var(--gold)'}}>Fotografiar factura</span>
+                  <span style={{fontSize:10,color:'var(--muted)',textAlign:'center'}}>Apoyala en una superficie plana, con buena luz</span>
+                  <input type="file" accept="image/*" capture="environment" style={{display:'none'}}
+                    onChange={e=>{ tomarFoto(e.target.files[0]); e.target.value=''; }}/>
+                </label>
+              ):(
+                <>
+                  <div style={{position:'relative',marginBottom:12}}>
+                    <img src={photo} alt="Factura" onClick={()=>setLightbox(photo)}
+                      style={{width:'100%',maxHeight:220,objectFit:'contain',borderRadius:10,background:'var(--bg)',cursor:'zoom-in',display:'block'}}/>
+                    <button onClick={()=>setPhoto(null)} disabled={busy}
+                      style={{position:'absolute',top:6,right:6,width:28,height:28,borderRadius:'50%',background:'rgba(0,0,0,.65)',
+                        border:'none',color:'#fff',fontSize:16,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+                  </div>
+
+                  <div style={{display:'flex',flexDirection:'column',gap:9}}>
+                    <div>
+                      <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Proveedor</div>
+                      <input className="minp" value={vendor} onChange={e=>setVendor(e.target.value)}
+                        placeholder="Ej: Kooyman, Ferretería..." autoCapitalize="words"/>
+                    </div>
+
+                    <div>
+                      <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Monto en florines (ƒ)</div>
+                      <input className="minp" type="number" inputMode="decimal" value={amount}
+                        onChange={e=>setAmount(e.target.value)} placeholder="0.00"/>
+                      {!isNaN(montoNum)&&montoNum>0&&(
+                        <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>
+                          equivale a <strong style={{color:'var(--gold)'}}>{fmtUsd(montoNum)}</strong> · tasa {AWG_USD}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Notas (opcional)</div>
+                      <input className="minp" value={notes} onChange={e=>setNotes(e.target.value)}
+                        placeholder="Ej: repuestos A/C para PAS 12"/>
+                    </div>
+
+                    {err&&(
+                      <div style={{background:'var(--urgent-bg)',border:'1px solid var(--urgent)',borderRadius:9,padding:'9px 11px',fontSize:11,color:'var(--urgent)',fontWeight:600}}>
+                        {err}
+                      </div>
+                    )}
+
+                    <button onClick={guardar} disabled={!puedeGuardar}
+                      style={{background:puedeGuardar?'var(--gold)':'var(--border)',color:puedeGuardar?'#1a1208':'var(--muted)',
+                        border:'none',borderRadius:10,padding:'13px',fontSize:14,fontWeight:800,cursor:puedeGuardar?'pointer':'default'}}>
+                      {busy?'Guardando...':'Guardar factura'}
+                    </button>
+                    {!vendor.trim()&&<div style={{fontSize:10,color:'var(--muted)',textAlign:'center'}}>Falta el proveedor</div>}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {okMsg&&(
+            <div style={{background:'rgba(45,110,78,.1)',border:'1px solid rgba(45,110,78,.3)',borderRadius:10,
+              padding:'10px 13px',fontSize:12,fontWeight:700,color:'var(--done)',display:'flex',alignItems:'center',gap:8}}>
+              ✓ {okMsg}
+            </div>
+          )}
+
+          {/* ── Listado ── */}
+          {list===null?<div className="spinner"/>:Array.isArray(list)&&(
+            list.length===0?(
+              <div className="empty" style={{padding:'22px 0'}}>
+                <div style={{fontSize:30,marginBottom:8}}>🧾</div>
+                <div className="empty-t">Sin facturas</div>
+                <div className="empty-s">Las que cargues van a aparecer acá.</div>
+              </div>
+            ):(
+              <div>
+                <div className="dash-section-title" style={{marginBottom:8}}>
+                  {isAdmin?'Todas las facturas':'Mis facturas'}
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:8}}>
+                  {list.map(inv=>(
+                    <div key={inv.id} style={{display:'flex',gap:10,alignItems:'flex-start',background:'var(--surface)',
+                      border:'1px solid var(--border)',borderRadius:12,padding:'9px 11px'}}>
+                      <img src={inv.photoUrl} alt="" loading="lazy" onClick={()=>setLightbox(inv.photoUrl)}
+                        style={{width:52,height:52,borderRadius:9,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.vendor||'(sin proveedor)'}</div>
+                        {inv.amountAwg!=null&&(
+                          <div style={{fontSize:12,fontWeight:800,color:'var(--gold)',marginTop:1}}>
+                            {fmtAwg(inv.amountAwg)} <span style={{fontSize:9,fontWeight:400,color:'var(--muted)'}}>· {fmtUsd(inv.amountAwg)}</span>
+                          </div>
+                        )}
+                        {inv.notes&&<div style={{fontSize:10,color:'var(--muted)',marginTop:2,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{inv.notes}</div>}
+                        <div style={{fontSize:9,color:'var(--muted)',marginTop:3}}>
+                          {fmtFecha(inv.createdAt)}{isAdmin&&inv.uploadedBy?` · ${inv.uploadedBy}`:''}
+                        </div>
+                      </div>
+                      <button onClick={()=>borrar(inv)} title="Borrar"
+                        style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:15,padding:'2px 4px',flexShrink:0}}>×</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          )}
+        </div>
+      </div>
+
+      {lightbox&&(
+        <div onClick={()=>setLightbox(null)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.93)',zIndex:200,
+          display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+          <img src={lightbox} style={{maxWidth:'100%',maxHeight:'90vh',borderRadius:12,objectFit:'contain'}}/>
+          <button onClick={()=>setLightbox(null)} style={{position:'absolute',top:16,right:16,background:'rgba(255,255,255,.1)',
+            border:'1px solid rgba(255,255,255,.15)',color:'#fff',width:36,height:36,borderRadius:50,fontSize:20,cursor:'pointer',
+            display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* APP */
 function App() {
   const { user, loading } = useAuth();
@@ -6171,6 +6398,7 @@ function App() {
     {id:'units',   label:'Unidades'},
     {id:'records', label:'Registros'},
     {id:'reservations', label:'Reservas'},
+    {id:'invoices', label:'Facturas'},
     ...(isAdmin?[{id:'users',label:'Usuarios'}]:[]),
   ];
 
@@ -6180,6 +6408,7 @@ function App() {
     units:   <UnitsScreen/>,
     records: <RecordsScreen/>,
     reservations: <ReservationsScreen/>,
+    invoices: <InvoicesScreen/>,
     users:   <UsersScreen/>,
   };
 
@@ -6196,6 +6425,7 @@ function App() {
             {t.id==='units'   &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>}
             {t.id==='records' &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>}
             {t.id==='reservations'&&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>}
+            {t.id==='invoices'&&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 2v20l2.5-1.5L9 22l2.5-1.5L14 22l2.5-1.5L19 22V2l-2.5 1.5L14 2l-2.5 1.5L9 2 6.5 3.5 4 2z"/><line x1="8" y1="8" x2="15" y2="8"/><line x1="8" y1="12" x2="15" y2="12"/></svg>}
             {t.id==='users'   &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>}
             <span>{t.label}</span>
             <div className="nav-dot"/>
