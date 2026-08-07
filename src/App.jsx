@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import './styles.css';
 
@@ -6188,10 +6189,19 @@ function InvoicesScreen() {
   const tomarFoto = async (file) => {
     if (!file) return;
     setErr('');
+    // Desde la galería se puede elegir cualquier cosa: avisar acá en vez de
+    // dejar que el servidor lo rechace después de subirlo.
+    if (!file.type || !file.type.startsWith('image/')) {
+      setErr('Solo se pueden subir imágenes (JPG, PNG, HEIC). Si la factura es un PDF, sacale una captura.');
+      return;
+    }
     // 1600px en vez de los 1200 de las tareas: la letra chica de un recibo
     // necesita más resolución para quedar legible.
     const data = await compressImage(file, 1600, 0.82);
-    if (!data) { setErr('No se pudo procesar la foto. Probá de nuevo.'); return; }
+    if (!data || !data.startsWith('data:image/')) {
+      setErr('No se pudo procesar la imagen. Probá con otra.');
+      return;
+    }
     setPhoto(data);
   };
 
@@ -6370,14 +6380,36 @@ ${fotos}
           {list!==false&&(
             <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'14px'}}>
               {!photo?(
-                <label style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:8,
-                  padding:'26px 14px',borderRadius:12,border:'2px dashed var(--border)',cursor:'pointer',background:'var(--bg)'}}>
-                  <span style={{fontSize:34,lineHeight:1}}>📄</span>
-                  <span style={{fontSize:14,fontWeight:800,color:'var(--gold)'}}>Fotografiar factura</span>
-                  <span style={{fontSize:10,color:'var(--muted)',textAlign:'center'}}>Apoyala en una superficie plana, con buena luz</span>
-                  <input type="file" accept="image/*" capture="environment" style={{display:'none'}}
-                    onChange={e=>{ tomarFoto(e.target.files[0]); e.target.value=''; }}/>
-                </label>
+                <>
+                  <div style={{display:'flex',gap:9}}>
+                    {/* capture="environment" abre la cámara trasera directamente */}
+                    <label style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:7,
+                      padding:'22px 10px',borderRadius:12,border:'2px dashed var(--gold)',cursor:'pointer',background:'rgba(201,150,58,.06)'}}>
+                      <span style={{fontSize:30,lineHeight:1}}>📷</span>
+                      <span style={{fontSize:13,fontWeight:800,color:'var(--gold)',textAlign:'center'}}>Tomar foto</span>
+                      <input type="file" accept="image/*" capture="environment" style={{display:'none'}}
+                        onChange={e=>{ tomarFoto(e.target.files[0]); e.target.value=''; }}/>
+                    </label>
+
+                    {/* Sin capture: abre la galería o el explorador de archivos */}
+                    <label style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:7,
+                      padding:'22px 10px',borderRadius:12,border:'2px dashed var(--border)',cursor:'pointer',background:'var(--bg)'}}>
+                      <span style={{fontSize:30,lineHeight:1}}>🖼️</span>
+                      <span style={{fontSize:13,fontWeight:800,color:'var(--muted)',textAlign:'center'}}>Elegir archivo</span>
+                      <input type="file" accept="image/*" style={{display:'none'}}
+                        onChange={e=>{ tomarFoto(e.target.files[0]); e.target.value=''; }}/>
+                    </label>
+                  </div>
+                  <div style={{fontSize:10,color:'var(--muted)',textAlign:'center',marginTop:9,lineHeight:1.5}}>
+                    Para fotografiarla, apoyala en una superficie plana y con buena luz.
+                  </div>
+                  {err&&(
+                    <div style={{background:'var(--urgent-bg)',border:'1px solid var(--urgent)',borderRadius:9,
+                      padding:'9px 11px',fontSize:11,color:'var(--urgent)',fontWeight:600,marginTop:9}}>
+                      {err}
+                    </div>
+                  )}
+                </>
               ):(
                 <>
                   <div style={{position:'relative',marginBottom:12}}>
