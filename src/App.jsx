@@ -6156,12 +6156,22 @@ function InvoicesScreen() {
   const [list,    setList]    = useState(null); // null = cargando · false = backend sin actualizar
   const [photo,   setPhoto]   = useState(null);
   const [vendor,  setVendor]  = useState('');
+  const [destino, setDestino] = useState('');   // 'mbl' | 'condominio'
   const [amount,  setAmount]  = useState('');
   const [notes,   setNotes]   = useState('');
   const [busy,    setBusy]    = useState(false);
   const [err,     setErr]     = useState('');
   const [okMsg,   setOkMsg]   = useState('');
   const [lightbox,setLightbox]= useState(null);
+  const [filtro,  setFiltro]  = useState('all'); // 'all' | 'mbl' | 'condominio'
+  const [dlBusy,  setDlBusy]  = useState('');
+
+  const DESTINOS = [
+    {id:'mbl',        label:'MBL',        color:'#2471a3'},
+    {id:'condominio', label:'Condominio', color:'#2d6e4e'},
+  ];
+  const destLabel = d => DESTINOS.find(x=>x.id===d)?.label || 'Sin clasificar';
+  const destColor = d => DESTINOS.find(x=>x.id===d)?.color || '#8b7355';
 
   const load = useCallback(async () => {
     try {
@@ -6173,7 +6183,7 @@ function InvoicesScreen() {
 
   useEffect(()=>{ load(); },[load]);
 
-  const limpiar = () => { setPhoto(null); setVendor(''); setAmount(''); setNotes(''); setErr(''); };
+  const limpiar = () => { setPhoto(null); setVendor(''); setDestino(''); setAmount(''); setNotes(''); setErr(''); };
 
   const tomarFoto = async (file) => {
     if (!file) return;
@@ -6186,10 +6196,10 @@ function InvoicesScreen() {
   };
 
   const guardar = async () => {
-    if (!photo || !vendor.trim()) return;
+    if (!photo || !vendor.trim() || !destino) return;
     setBusy(true); setErr('');
     try {
-      const body = { vendor: vendor.trim(), notes: notes.trim(), data: photo };
+      const body = { vendor: vendor.trim(), destino, notes: notes.trim(), data: photo };
       const monto = parseFloat(String(amount).replace(',','.'));
       if (!isNaN(monto) && monto > 0) body.amountAwg = monto;
 
@@ -6217,15 +6227,126 @@ function InvoicesScreen() {
     else alert('No se pudo borrar.');
   };
 
+  // Corregir el destino sin tener que borrar y volver a fotografiar
+  const cambiarDestino = async (inv, nuevo) => {
+    const r = await authFetch(`/invoices/${inv.id}`,{method:'PATCH',body:JSON.stringify({destino:nuevo})});
+    if (r.ok) {
+      const upd = await r.json();
+      setList(prev=>prev.map(x=>x.id===inv.id?upd:x));
+    } else alert('No se pudo cambiar el destino.');
+  };
+
   const fmtFecha = iso => {
     try { return new Date(iso).toLocaleDateString('es-VE',{day:'numeric',month:'short',year:'numeric'}); }
     catch { return String(iso).slice(0,10); }
+  };
+
+  // Archivo mensual para entregar a la administración correspondiente.
+  // Mismo formato que el archivo de tareas: HTML con las fotos incrustadas en
+  // base64, que se abre con el diálogo de impresión para guardar como PDF.
+  const descargarMes = async (mesKey, dest, facturas) => {
+    setDlBusy(mesKey+dest);
+    const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    const [yy,mm] = mesKey.split('-');
+    const mesLabel = `${MESES[parseInt(mm,10)-1]} ${yy}`;
+    const destTxt  = destLabel(dest);
+
+    const toBase64 = async url => {
+      try {
+        const r = await fetch(url);
+        const blob = await r.blob();
+        return await new Promise(res=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.readAsDataURL(blob); });
+      } catch { return null; }
+    };
+    const conFoto = await Promise.all(facturas.map(async f=>({ ...f, b64: await toBase64(f.photoUrl) })));
+
+    const totalAwg = facturas.reduce((s,f)=>s+(Number(f.amountAwg)||0),0);
+    const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    const filas = conFoto.map((f,i)=>`<tr>
+      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;color:#8b7355">${i+1}</td>
+      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:12px;font-weight:600">${esc(f.vendor)}</td>
+      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;color:#5a4a35">${esc(f.notes)}</td>
+      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;color:#8b7355;white-space:nowrap">${fmtFecha(f.createdAt)}</td>
+      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:12px;text-align:right;font-weight:700;white-space:nowrap">${f.amountAwg!=null?fmtAwg(f.amountAwg):'—'}</td>
+      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;text-align:right;color:#8b7355;white-space:nowrap">${f.amountAwg!=null?fmtUsd(f.amountAwg):''}</td>
+    </tr>`).join('');
+
+    const fotos = conFoto.map((f,i)=>`
+      <div class="card">
+        <div class="card-h">
+          <span class="num">#${i+1}</span>
+          <span class="ven">${esc(f.vendor)}</span>
+          <span class="amt">${f.amountAwg!=null?fmtAwg(f.amountAwg):''}</span>
+        </div>
+        ${f.notes?`<div class="note">${esc(f.notes)}</div>`:''}
+        ${f.b64
+          ? `<img src="${f.b64}"/>`
+          : `<div class="miss">No se pudo incrustar la foto. Ver: ${esc(f.photoUrl)}</div>`}
+      </div>`).join('');
+
+    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Facturas ${destTxt} — ${mesLabel}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Georgia,serif;background:#fff;color:#1a1208;padding:30px;max-width:820px;margin:0 auto}
+  .sub{font-size:10px;color:#8b7355;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:4px}
+  h1{font-size:25px;margin-bottom:3px}
+  .meta{font-size:12px;color:#8b7355;margin-bottom:20px}
+  table{width:100%;border-collapse:collapse;border:1px solid #e4d9c8;margin-bottom:8px}
+  th{padding:8px 9px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#8b7355;background:#f7f2eb;border-bottom:2px solid #c9963a;text-align:left}
+  .tot{background:#fbf6ec;font-weight:800;color:#c9963a}
+  .card{border:1px solid #e4d9c8;border-radius:9px;padding:12px;margin-bottom:14px;page-break-inside:avoid}
+  .card-h{display:flex;align-items:baseline;gap:9px;margin-bottom:6px}
+  .num{font-size:10px;font-weight:800;color:#c9963a}
+  .ven{font-size:14px;font-weight:700;flex:1}
+  .amt{font-size:13px;font-weight:800}
+  .note{font-size:11px;color:#5a4a35;margin-bottom:7px}
+  .card img{width:100%;max-height:640px;object-fit:contain;border-radius:6px;display:block;background:#f7f2eb}
+  .miss{font-size:10px;color:#b83232;word-break:break-all}
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:#c9963a;margin:26px 0 12px;padding-bottom:6px;border-bottom:1px solid #e4d9c8}
+  .foot{margin-top:26px;padding-top:12px;border-top:1px solid #e4d9c8;font-size:9px;color:#a99a80;display:flex;justify-content:space-between}
+  @media print{body{padding:14px}@page{margin:1.2cm}
+    table,tr,td,th,.card{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style></head><body>
+<div class="sub">Porta Al Sole · Rendición de facturas</div>
+<h1>${destTxt} — ${mesLabel}</h1>
+<div class="meta">${facturas.length} factura${facturas.length!==1?'s':''} · Total ${fmtAwg(totalAwg)} (${fmtUsd(totalAwg)})</div>
+
+<table>
+  <thead><tr><th>#</th><th>Proveedor</th><th>Detalle</th><th>Fecha</th><th style="text-align:right">Monto ƒ</th><th style="text-align:right">USD</th></tr></thead>
+  <tbody>${filas}
+    <tr class="tot">
+      <td colspan="4" style="padding:9px">TOTAL</td>
+      <td style="padding:9px;text-align:right;white-space:nowrap">${fmtAwg(totalAwg)}</td>
+      <td style="padding:9px;text-align:right;white-space:nowrap">${fmtUsd(totalAwg)}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Comprobantes</h2>
+${fotos}
+
+<div class="foot">
+  <span>Porta Al Sole Condos · Aruba</span>
+  <span>Generado el ${new Date().toLocaleDateString('es-VE',{day:'2-digit',month:'long',year:'numeric'})}</span>
+</div>
+<script>window.onload=()=>window.print()<\/script>
+</body></html>`;
+
+    const blob = new Blob([html],{type:'text/html'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `facturas-${dest}-${mesKey}.html`;
+    a.click();
+    setDlBusy('');
   };
   const fmtAwg = n => 'ƒ'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   const fmtUsd = n => '$'+(Number(n)/AWG_USD).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
   const montoNum = parseFloat(String(amount).replace(',','.'));
-  const puedeGuardar = !!photo && !!vendor.trim() && !busy;
+  const puedeGuardar = !!photo && !!vendor.trim() && !!destino && !busy;
+  const faltante = !vendor.trim() ? 'Falta el proveedor' : !destino ? 'Elegí si es de MBL o del Condominio' : '';
 
   return (
     <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
@@ -6275,6 +6396,25 @@ function InvoicesScreen() {
                     </div>
 
                     <div>
+                      <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>¿A quién se entrega?</div>
+                      <div style={{display:'flex',gap:8}}>
+                        {DESTINOS.map(d=>{
+                          const on = destino===d.id;
+                          return (
+                            <button key={d.id} onClick={()=>setDestino(d.id)} disabled={busy}
+                              style={{flex:1,padding:'12px 8px',borderRadius:10,cursor:'pointer',
+                                border:`2px solid ${on?d.color:'var(--border)'}`,
+                                background:on?`${d.color}1f`:'var(--bg)',
+                                color:on?d.color:'var(--muted)',
+                                fontSize:14,fontWeight:800}}>
+                              {on?'✓ ':''}{d.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
                       <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Monto en florines (ƒ)</div>
                       <input className="minp" type="number" inputMode="decimal" value={amount}
                         onChange={e=>setAmount(e.target.value)} placeholder="0.00"/>
@@ -6302,7 +6442,7 @@ function InvoicesScreen() {
                         border:'none',borderRadius:10,padding:'13px',fontSize:14,fontWeight:800,cursor:puedeGuardar?'pointer':'default'}}>
                       {busy?'Guardando...':'Guardar factura'}
                     </button>
-                    {!vendor.trim()&&<div style={{fontSize:10,color:'var(--muted)',textAlign:'center'}}>Falta el proveedor</div>}
+                    {faltante&&<div style={{fontSize:10,color:'var(--muted)',textAlign:'center'}}>{faltante}</div>}
                   </div>
                 </>
               )}
@@ -6324,36 +6464,126 @@ function InvoicesScreen() {
                 <div className="empty-t">Sin facturas</div>
                 <div className="empty-s">Las que cargues van a aparecer acá.</div>
               </div>
-            ):(
-              <div>
-                <div className="dash-section-title" style={{marginBottom:8}}>
-                  {isAdmin?'Todas las facturas':'Mis facturas'}
-                </div>
-                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:8}}>
-                  {list.map(inv=>(
-                    <div key={inv.id} style={{display:'flex',gap:10,alignItems:'flex-start',background:'var(--surface)',
-                      border:'1px solid var(--border)',borderRadius:12,padding:'9px 11px'}}>
-                      <img src={inv.photoUrl} alt="" loading="lazy" onClick={()=>setLightbox(inv.photoUrl)}
-                        style={{width:52,height:52,borderRadius:9,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.vendor||'(sin proveedor)'}</div>
-                        {inv.amountAwg!=null&&(
-                          <div style={{fontSize:12,fontWeight:800,color:'var(--gold)',marginTop:1}}>
-                            {fmtAwg(inv.amountAwg)} <span style={{fontSize:9,fontWeight:400,color:'var(--muted)'}}>· {fmtUsd(inv.amountAwg)}</span>
-                          </div>
-                        )}
-                        {inv.notes&&<div style={{fontSize:10,color:'var(--muted)',marginTop:2,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{inv.notes}</div>}
-                        <div style={{fontSize:9,color:'var(--muted)',marginTop:3}}>
-                          {fmtFecha(inv.createdAt)}{isAdmin&&inv.uploadedBy?` · ${inv.uploadedBy}`:''}
-                        </div>
-                      </div>
-                      <button onClick={()=>borrar(inv)} title="Borrar"
-                        style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:15,padding:'2px 4px',flexShrink:0}}>×</button>
+            ):(()=>{
+              const visibles = filtro==='all' ? list : list.filter(x=>x.destino===filtro);
+
+              // Agrupar por mes y, dentro de cada mes, por destino: así cada
+              // descarga es exactamente el paquete que va a una administración.
+              const meses = {};
+              visibles.forEach(f=>{
+                const mk = String(f.createdAt).slice(0,7); // YYYY-MM
+                const dk = f.destino || 'sin';
+                if (!meses[mk]) meses[mk] = {};
+                if (!meses[mk][dk]) meses[mk][dk] = [];
+                meses[mk][dk].push(f);
+              });
+              const mesKeys = Object.keys(meses).sort((a,b)=>b.localeCompare(a));
+              const MESES_F = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+              const mesLabel = mk => { const [y,m]=mk.split('-'); return `${MESES_F[parseInt(m,10)-1]} ${y}`; };
+
+              return (
+                <div>
+                  {/* Filtro por destino */}
+                  <div style={{display:'flex',gap:6,marginBottom:12}}>
+                    {[{id:'all',label:'Todas',color:'var(--gold)'},...DESTINOS].map(f=>{
+                      const on = filtro===f.id;
+                      const n = f.id==='all' ? list.length : list.filter(x=>x.destino===f.id).length;
+                      return (
+                        <button key={f.id} onClick={()=>setFiltro(f.id)}
+                          style={{flex:1,padding:'7px 6px',borderRadius:8,cursor:'pointer',fontSize:11,fontWeight:800,
+                            border:`1.5px solid ${on?f.color:'var(--border)'}`,
+                            background:on?`${f.color}1a`:'transparent',
+                            color:on?f.color:'var(--muted)'}}>
+                          {f.label} <span style={{fontWeight:400,opacity:.7}}>{n}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {visibles.length===0&&(
+                    <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'14px 0'}}>
+                      No hay facturas de {destLabel(filtro)}.
                     </div>
-                  ))}
+                  )}
+
+                  <div style={{display:'flex',flexDirection:'column',gap:14}}>
+                    {mesKeys.map(mk=>(
+                      <div key={mk}>
+                        <div className="dash-section-title" style={{marginBottom:7}}>{mesLabel(mk)}</div>
+
+                        {Object.keys(meses[mk]).sort().map(dk=>{
+                          const grupo = meses[mk][dk];
+                          const total = grupo.reduce((s,f)=>s+(Number(f.amountAwg)||0),0);
+                          const col = destColor(dk==='sin'?null:dk);
+                          const bajando = dlBusy===mk+dk;
+                          return (
+                            <div key={dk} style={{marginBottom:10}}>
+                              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,flexWrap:'wrap'}}>
+                                <span style={{fontSize:11,fontWeight:800,color:col,background:`${col}1a`,
+                                  border:`1px solid ${col}44`,borderRadius:7,padding:'3px 9px'}}>
+                                  {destLabel(dk==='sin'?null:dk)}
+                                </span>
+                                <span style={{fontSize:10,color:'var(--muted)'}}>
+                                  {grupo.length} · {fmtAwg(total)}
+                                </span>
+                                <span style={{flex:1}}/>
+                                {dk!=='sin'&&(
+                                  <button onClick={()=>descargarMes(mk, dk, grupo)} disabled={!!dlBusy}
+                                    style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',
+                                      borderRadius:8,padding:'5px 11px',fontSize:10,fontWeight:800,
+                                      cursor:dlBusy?'default':'pointer',flexShrink:0}}>
+                                    {bajando?'Preparando...':'⬇ Descargar'}
+                                  </button>
+                                )}
+                              </div>
+
+                              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:8}}>
+                                {grupo.map(inv=>(
+                                  <div key={inv.id} style={{display:'flex',gap:10,alignItems:'flex-start',background:'var(--surface)',
+                                    border:'1px solid var(--border)',borderLeft:`3px solid ${destColor(inv.destino)}`,
+                                    borderRadius:12,padding:'9px 11px'}}>
+                                    <img src={inv.photoUrl} alt="" loading="lazy" onClick={()=>setLightbox(inv.photoUrl)}
+                                      style={{width:52,height:52,borderRadius:9,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
+                                    <div style={{flex:1,minWidth:0}}>
+                                      <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.vendor||'(sin proveedor)'}</div>
+                                      {inv.amountAwg!=null&&(
+                                        <div style={{fontSize:12,fontWeight:800,color:'var(--gold)',marginTop:1}}>
+                                          {fmtAwg(inv.amountAwg)} <span style={{fontSize:9,fontWeight:400,color:'var(--muted)'}}>· {fmtUsd(inv.amountAwg)}</span>
+                                        </div>
+                                      )}
+                                      {inv.notes&&<div style={{fontSize:10,color:'var(--muted)',marginTop:2,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{inv.notes}</div>}
+                                      <div style={{fontSize:9,color:'var(--muted)',marginTop:3}}>
+                                        {fmtFecha(inv.createdAt)}{isAdmin&&inv.uploadedBy?` · ${inv.uploadedBy}`:''}
+                                      </div>
+                                      {/* Corregir el destino sin volver a fotografiar */}
+                                      <div style={{display:'flex',gap:4,marginTop:5}}>
+                                        {DESTINOS.map(d=>(
+                                          <button key={d.id} onClick={()=>cambiarDestino(inv,d.id)}
+                                            disabled={inv.destino===d.id}
+                                            style={{fontSize:8.5,fontWeight:800,padding:'2px 7px',borderRadius:5,
+                                              cursor:inv.destino===d.id?'default':'pointer',
+                                              border:`1px solid ${inv.destino===d.id?d.color:'var(--border)'}`,
+                                              background:inv.destino===d.id?`${d.color}1a`:'transparent',
+                                              color:inv.destino===d.id?d.color:'var(--muted)'}}>
+                                            {d.label}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                    <button onClick={()=>borrar(inv)} title="Borrar"
+                                      style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:15,padding:'2px 4px',flexShrink:0}}>×</button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )
+              );
+            })()
           )}
         </div>
       </div>
