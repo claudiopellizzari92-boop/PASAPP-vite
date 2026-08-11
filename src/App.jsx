@@ -147,6 +147,7 @@ function AuthProvider({ children }) {
           checkOut: new Date(r.check_out),
           income:   r.income,
           hostawayId: r.hostaway_id,
+          reservationId: r.reservation_id || '',
         })));
       }
     } catch(e) {}
@@ -268,6 +269,7 @@ function AuthProvider({ children }) {
           checkOut:   r.checkOut.toISOString(),
           income:     r.income||'',
           hostawayId: r.hostawayId||'',
+          reservationId: r.reservationId||'',
         }))})
       });
       if (!r.ok) return { ok:false, error:`Error ${r.status} del servidor` };
