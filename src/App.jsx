@@ -128,6 +128,7 @@ function AuthProvider({ children }) {
           checkOut: new Date(r.check_out),
           income:   r.income,
           hostawayId: r.hostaway_id,
+          reservationId: r.reservation_id || '',
         })));
       }
     } catch(e) { console.log('Reservations fetch failed', e); }
@@ -287,6 +288,7 @@ function AuthProvider({ children }) {
           checkOut:   r.checkOut.toISOString(),
           income:     r.income||'',
           hostawayId: r.hostawayId||'',
+          reservationId: r.reservationId||'',
         }))})
       });
       if (!r.ok) return { ok:false, error:`Error ${r.status} del servidor` };
@@ -455,6 +457,9 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     if (row.type !== 'guest') continue;
 
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
+    // display_id trae "aw-portaalsole10 | 30492867": la segunda parte es el
+    // numero de reserva de Hostaway, estable aunque cambien fechas o monto.
+    const reservationId = ((row.display_id||'').split('|')[1]||'').trim();
     const unitIds = HOSTAWAY_MAP[hostawayId];
     if (!unitIds) continue;
 
@@ -486,6 +491,7 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
         checkOut,
         income:   splitIncome,
         hostawayId,
+        reservationId,
       });
     });
   }
@@ -498,6 +504,63 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     return true;
   });
 }
+// ── Fusión de reservas al importar un CSV ──────────────────────────────
+// Hostaway exporta como máximo 1000 filas, así que un solo archivo ya no
+// alcanza para cubrir todo el histórico. En vez de reemplazar, se acumula.
+//
+// Clave preferida: número de reserva + unidad. Es estable aunque el huésped
+// extienda la estadía o cambie el monto, así que la reserva se actualiza en
+// lugar de duplicarse. Las reservas guardadas antes de que existiera ese
+// campo caen en la clave de respaldo (unidad + fechas).
+const resKey   = r => r.reservationId ? `R${r.reservationId}_${r.unitId}` : null;
+const resKeyFb = r => `F${r.unitId}_${r.checkIn.getTime()}_${r.checkOut.getTime()}`;
+
+function mergeReservations(existentes, nuevas, canceladasNuevas = []) {
+  const porClave    = new Map(); // clave definitiva → reserva
+  const claveDeFb   = new Map(); // clave de respaldo → clave definitiva
+  let nuevas_ = 0, actualizadas = 0, sinCambio = 0;
+
+  const poner = (r, esNueva) => {
+    const k  = resKey(r) || resKeyFb(r);
+    const fb = resKeyFb(r);
+    // Si esta reserva ya estaba guardada sin número, reemplazar esa entrada
+    // en vez de crear una segunda con la clave nueva.
+    const previa = claveDeFb.get(fb);
+    if (previa && previa !== k) porClave.delete(previa);
+
+    if (esNueva) {
+      const anterior = porClave.get(k) || (previa ? null : undefined);
+      if (porClave.has(k) || previa) {
+        const viejo = porClave.get(k);
+        if (viejo && viejo.income === r.income && viejo.guest === r.guest) sinCambio++;
+        else actualizadas++;
+      } else nuevas_++;
+    }
+    porClave.set(k, r);
+    claveDeFb.set(fb, k);
+  };
+
+  (existentes||[]).forEach(r => poner(r, false));
+  (nuevas||[]).forEach(r => poner(r, true));
+
+  // Una reserva que aparece como cancelada en el CSV nuevo se retira del
+  // listado: sin esto quedaría para siempre, porque fusionar nunca borra.
+  let canceladas = 0;
+  (canceladasNuevas||[]).forEach(c => {
+    const k = resKey(c) || resKeyFb(c);
+    if (porClave.delete(k)) canceladas++;
+    else {
+      const alt = claveDeFb.get(resKeyFb(c));
+      if (alt && porClave.delete(alt)) canceladas++;
+    }
+  });
+
+  return {
+    lista: [...porClave.values()],
+    stats: { nuevas: nuevas_, actualizadas, sinCambio, canceladas },
+  };
+}
+
 // ── Parser de CSV de QuickBooks (Lista de transacciones por proveedor) ──
 const parseQBFields = (l) => {
   const out=[]; let cur=''; let inQ=false;
@@ -4566,8 +4629,16 @@ function ReservationsScreen() {
                 setImportResult(null);
                 try {
                   const stats = parseHostawayWithStats(text);
-                  const res = parseHostawayCSV(text);
-                  const canc = parseHostawayCancellationsCSV(text);
+                  const resCsv  = parseHostawayCSV(text);
+                  const cancCsv = parseHostawayCancellationsCSV(text);
+
+                  // Hostaway exporta máximo 1000 filas: se acumula en vez de
+                  // reemplazar, para poder reconstruir el histórico completo.
+                  const fusion = mergeReservations(reservations, resCsv, cancCsv);
+                  const res = fusion.lista;
+                  const mergeStats = fusion.stats;
+                  const cancFusion = mergeReservations(cancellations, cancCsv);
+                  const canc = cancFusion.lista;
 
                   // Calcular ingresos del año actual del CSV nuevo (snapshot)
                   const calcYearIncome = (rlist, yr) => rlist
@@ -4652,7 +4723,8 @@ function ReservationsScreen() {
                     localStorage.setItem('pas_income_snapshot', JSON.stringify({
                       year: thisYr, total: newTotal, byUnit: newByUnit, resByUnit: newResByUnit, date: new Date().toLocaleDateString('es-VE')
                     }));
-                    setImportResult({ ok:true, stats, imported:res.length, importedCanc:canc.length, snapshotDiff, unitChanges, newTotal });
+                    setImportResult({ ok:true, stats, mergeStats, csvCount:resCsv.length,
+                                      imported:res.length, importedCanc:canc.length, snapshotDiff, unitChanges, newTotal });
                   } else {
                     setImportResult({ ok:false, error:(r1.error||r2.error||'Error desconocido') });
                   }
@@ -5975,6 +6047,31 @@ function ReservationsScreen() {
                 <div style={{fontSize:34,textAlign:'center',marginBottom:6}}>✅</div>
                 <div style={{fontSize:17,fontWeight:700,fontFamily:'var(--serif)',textAlign:'center',marginBottom:14}}>Importación completa</div>
 
+                {/* Resultado de la fusión: el CSV se suma a lo que ya había */}
+                {importResult.mergeStats&&(
+                  <div style={{background:'var(--bg)',borderRadius:10,padding:'11px 13px',marginBottom:12}}>
+                    <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,fontWeight:700,marginBottom:7}}>
+                      {importResult.csvCount} reservas en el archivo
+                    </div>
+                    {[
+                      ['Nuevas',        importResult.mergeStats.nuevas,       'var(--done)'],
+                      ['Actualizadas',  importResult.mergeStats.actualizadas, 'var(--gold)'],
+                      ['Ya estaban',    importResult.mergeStats.sinCambio,    'var(--muted)'],
+                      ['Canceladas y retiradas', importResult.mergeStats.canceladas, 'var(--urgent)'],
+                    ].filter(([,n])=>n>0).map(([lbl,n,col])=>(
+                      <div key={lbl} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',fontSize:12}}>
+                        <span style={{color:'var(--muted)'}}>{lbl}</span>
+                        <span style={{fontWeight:700,color:col}}>{n}</span>
+                      </div>
+                    ))}
+                    <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0 0',marginTop:5,
+                      borderTop:'1px solid var(--border)',fontSize:13}}>
+                      <span style={{fontWeight:700,color:'var(--gold)'}}>Total acumulado</span>
+                      <span style={{fontWeight:800,color:'var(--gold)'}}>{importResult.imported}</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Comparación de ingresos vs última carga */}
                 {importResult.snapshotDiff ? (
                   <div style={{background:importResult.snapshotDiff.diff>=0?'rgba(45,110,78,.1)':'rgba(184,50,50,.08)',border:`1px solid ${importResult.snapshotDiff.diff>=0?'rgba(45,110,78,.25)':'rgba(184,50,50,.2)'}`,borderRadius:10,padding:'12px 14px',marginBottom:12,textAlign:'center'}}>
@@ -6035,7 +6132,7 @@ function ReservationsScreen() {
 
                 <div style={{background:'var(--bg)',borderRadius:10,padding:'12px 14px',marginBottom:12}}>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
-                    <span style={{color:'var(--muted)'}}>Reservas activas</span>
+                    <span style={{color:'var(--muted)'}}>Reservas guardadas</span>
                     <span style={{fontWeight:700,color:'var(--done)'}}>{importResult.imported}</span>
                   </div>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
