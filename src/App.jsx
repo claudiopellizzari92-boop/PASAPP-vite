@@ -430,7 +430,7 @@ function parseHostawayWithStats(csvText) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
     if (!row.status) continue;
     stats.totalRows++;
-    if (row.type === 'owner') stats.ownerBlocks++;
+    if (row.type === 'owner' || row.type === 'bocobay') stats.ownerBlocks++;
     else if (row.type !== 'guest') { stats.skippedOther++; continue; }
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     if (!HOSTAWAY_MAP[hostawayId]) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
@@ -459,10 +459,12 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
 
     if (row.status !== filterStatus) continue;
-    // Los bloqueos de propietario entran marcados: ocupan la unidad (importa
-    // para consumo de agua y verificaciones) pero no generan ingresos.
-    if (row.type !== 'guest' && row.type !== 'owner') continue;
-    const isOwner = row.type === 'owner';
+    // Bloqueos sin ingreso: propietario (owner) y administradora (bocobay:
+    // mantenimiento, late check-out, extensiones). Entran marcados porque
+    // ocupan la unidad -importa para consumo de agua y verificaciones- pero
+    // no generan ingresos.
+    if (row.type !== 'guest' && row.type !== 'owner' && row.type !== 'bocobay') continue;
+    const isOwner = row.type === 'owner' || row.type === 'bocobay';
 
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     // display_id trae "aw-portaalsole10 | 30492867": la segunda parte es el
@@ -2680,7 +2682,7 @@ function UnitsScreen() {
                           <div key={i}>
                             <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>
                               {r.guest}
-                              {r.isOwner&&<span style={{fontSize:8.5,fontWeight:800,color:'#8b7355',background:'rgba(139,115,85,.15)',padding:'1px 6px',borderRadius:5,marginLeft:5}}>PROPIETARIO</span>}
+                              {r.isOwner&&<span style={{fontSize:8.5,fontWeight:800,color:'#8b7355',background:'rgba(139,115,85,.15)',padding:'1px 6px',borderRadius:5,marginLeft:5}}>BLOQUEO</span>}
                             </div>
                             <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>{fmt(r.checkIn)} → {fmt(r.checkOut)} · {daysUntil(r.checkOut)} días restantes</div>
                           </div>
@@ -2700,7 +2702,7 @@ function UnitsScreen() {
                                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:6}}>
                                     <div style={{fontSize:13,fontWeight:700,color:'var(--text)',minWidth:0}}>
                                       {r.guest}
-                                      {r.isOwner&&<span style={{fontSize:8.5,fontWeight:800,color:'#8b7355',background:'rgba(139,115,85,.15)',padding:'1px 6px',borderRadius:5,marginLeft:5,whiteSpace:'nowrap'}}>PROPIETARIO</span>}
+                                      {r.isOwner&&<span style={{fontSize:8.5,fontWeight:800,color:'#8b7355',background:'rgba(139,115,85,.15)',padding:'1px 6px',borderRadius:5,marginLeft:5,whiteSpace:'nowrap'}}>BLOQUEO</span>}
                                     </div>
                                     <div style={{fontSize:10,fontWeight:800,flexShrink:0,color:days<=3?'var(--urgent)':days<=7?'var(--gold)':'var(--done)',background:days<=3?'rgba(184,50,50,.1)':days<=7?'rgba(201,150,58,.1)':'rgba(45,110,78,.1)',padding:'2px 8px',borderRadius:10}}>
                                       {days===0?'Hoy':days===1?'Mañana':`En ${days}d`}
@@ -4846,7 +4848,7 @@ function ReservationsScreen() {
                             const OWN='rgba(139,115,85,.45)'; // bloqueo del propietario
                             const esOwn = r => r && r.isOwner;
                             if (both)      { bg=`linear-gradient(90deg, ${OUT} 0 50%, ${esOwn(cinRes)?OWN:IN} 50% 100%)`; title=`Sale: ${coutRes.guest} · Entra: ${cinRes.guest}`; }
-                            else if (cin)  { bg=esOwn(cinRes)?OWN:IN; title=`${esOwn(cinRes)?'Bloqueo propietario':'Entra'}: ${cinRes.guest}`; }
+                            else if (cin)  { bg=esOwn(cinRes)?OWN:IN; title=`${esOwn(cinRes)?'Bloqueo':'Entra'}: ${cinRes.guest}`; }
                             else if (cout) { bg=OUT; title=`Sale: ${coutRes.guest}`; }
                             else if (res)  { bg=esOwn(res)?OWN:BUSY; title=`${esOwn(res)?'Propietario · ':''}${res.guest}`; }
                             else           { bg=isWknd?'rgba(201,150,58,.06)':'transparent'; }
@@ -6161,7 +6163,7 @@ function ReservationsScreen() {
                     <span style={{fontWeight:700}}>{importResult.importedCanc}</span>
                   </div>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13,borderTop:'1px solid var(--border)',marginTop:4,paddingTop:8}}>
-                    <span style={{color:'var(--muted)'}}>Bloqueos del propietario</span>
+                    <span style={{color:'var(--muted)'}}>Bloqueos (propietario / Bocobay)</span>
                     <span style={{fontWeight:700,color:'#8b7355'}}>{importResult.stats.ownerBlocks}</span>
                   </div>
                   <div style={{fontSize:9,color:'var(--muted)',fontStyle:'italic',marginTop:2,lineHeight:1.4}}>
