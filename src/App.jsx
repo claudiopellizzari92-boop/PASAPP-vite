@@ -430,7 +430,7 @@ function parseHostawayWithStats(csvText) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
     if (!row.status) continue;
     stats.totalRows++;
-    if (row.type === 'owner' || row.type === 'bocobay') stats.ownerBlocks++;
+    if (row.type === 'owner') stats.ownerBlocks++;
     else if (row.type !== 'guest') { stats.skippedOther++; continue; }
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     if (!HOSTAWAY_MAP[hostawayId]) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
@@ -459,12 +459,12 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
 
     if (row.status !== filterStatus) continue;
-    // Bloqueos sin ingreso: propietario (owner) y administradora (bocobay:
-    // mantenimiento, late check-out, extensiones). Entran marcados porque
-    // ocupan la unidad -importa para consumo de agua y verificaciones- pero
-    // no generan ingresos.
-    if (row.type !== 'guest' && row.type !== 'owner' && row.type !== 'bocobay') continue;
-    const isOwner = row.type === 'owner' || row.type === 'bocobay';
+    // Los bloqueos de propietario (owner) entran marcados: ocupan la unidad
+    // -importa para consumo de agua y verificaciones- pero no generan ingresos.
+    // Los de la administradora (bocobay) se descartan: incluyen bloqueos muy
+    // largos de onboarding que no reflejan ocupacion real.
+    if (row.type !== 'guest' && row.type !== 'owner') continue;
+    const isOwner = row.type === 'owner';
 
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     // display_id trae "aw-portaalsole10 | 30492867": la segunda parte es el
@@ -6163,12 +6163,18 @@ function ReservationsScreen() {
                     <span style={{fontWeight:700}}>{importResult.importedCanc}</span>
                   </div>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13,borderTop:'1px solid var(--border)',marginTop:4,paddingTop:8}}>
-                    <span style={{color:'var(--muted)'}}>Bloqueos (propietario / Bocobay)</span>
+                    <span style={{color:'var(--muted)'}}>Bloqueos del propietario</span>
                     <span style={{fontWeight:700,color:'#8b7355'}}>{importResult.stats.ownerBlocks}</span>
                   </div>
                   <div style={{fontSize:9,color:'var(--muted)',fontStyle:'italic',marginTop:2,lineHeight:1.4}}>
                     Ocupan la unidad (cuentan para agua y verificaciones) pero no suman ingresos.
                   </div>
+                  {importResult.stats.skippedOther>0&&(
+                    <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
+                      <span style={{color:'var(--muted)'}}>Bloqueos de Bocobay (descartados)</span>
+                      <span style={{color:'var(--muted)'}}>{importResult.stats.skippedOther}</span>
+                    </div>
+                  )}
                   {importResult.stats.skippedUnknownUnit>0&&(
                     <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
                       <span style={{color:'var(--urgent)'}}>Unidad desconocida</span>
