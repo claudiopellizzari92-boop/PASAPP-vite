@@ -129,6 +129,7 @@ function AuthProvider({ children }) {
           income:   r.income,
           hostawayId: r.hostaway_id,
           reservationId: r.reservation_id || '',
+          isOwner:   r.is_owner === true,
         })));
       }
     } catch(e) { console.log('Reservations fetch failed', e); }
@@ -291,6 +292,7 @@ function AuthProvider({ children }) {
           income:     r.income||'',
           hostawayId: r.hostawayId||'',
           reservationId: r.reservationId||'',
+          isOwner:    r.isOwner===true,
         }))})
       });
       if (!r.ok) return { ok:false, error:`Error ${r.status} del servidor` };
@@ -419,7 +421,7 @@ function parseHostawayWithStats(csvText) {
   const headers = lines[0].replace(/\r/,'').split(',');
   const stats = {
     totalRows: 0, confirmed: 0, cancelled: 0,
-    skippedOwner: 0, skippedUnknownUnit: 0, skippedBadDate: 0,
+    ownerBlocks: 0, skippedOther: 0, skippedUnknownUnit: 0, skippedBadDate: 0,
     unknownUnits: new Set(),
   };
   for (let i=1; i<lines.length; i++) {
@@ -428,7 +430,8 @@ function parseHostawayWithStats(csvText) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
     if (!row.status) continue;
     stats.totalRows++;
-    if (row.type !== 'guest') { stats.skippedOwner++; continue; }
+    if (row.type === 'owner') stats.ownerBlocks++;
+    else if (row.type !== 'guest') { stats.skippedOther++; continue; }
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     if (!HOSTAWAY_MAP[hostawayId]) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
     const dateParts = (row.display_dates||'').split(' - ');
@@ -456,7 +459,10 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
 
     if (row.status !== filterStatus) continue;
-    if (row.type !== 'guest') continue;
+    // Los bloqueos de propietario entran marcados: ocupan la unidad (importa
+    // para consumo de agua y verificaciones) pero no generan ingresos.
+    if (row.type !== 'guest' && row.type !== 'owner') continue;
+    const isOwner = row.type === 'owner';
 
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     // display_id trae "aw-portaalsole10 | 30492867": la segunda parte es el
@@ -491,9 +497,10 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
         guest:    row.name,
         checkIn,
         checkOut,
-        income:   splitIncome,
+        income:   isOwner ? '' : splitIncome,
         hostawayId,
         reservationId,
+        isOwner,
       });
     });
   }
@@ -1938,7 +1945,8 @@ function UnitsScreen() {
     const nightsOf = r => Math.max(1,Math.round((r.checkOut-r.checkIn)/86400000));
     const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-    const resU = reservations.filter(r=>r.unitId===selU);
+    // Owner blocks generate no revenue: excluded from this investor-facing report.
+    const resU = reservations.filter(r=>r.unitId===selU && !r.isOwner);
     if (resU.length===0) { alert('This unit has no reservations on record.'); return; }
 
     // Sync dialogs first (they keep the click gesture alive)
@@ -2670,7 +2678,10 @@ function UnitsScreen() {
                         </div>
                         {current.map((r,i)=>(
                           <div key={i}>
-                            <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{r.guest}</div>
+                            <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>
+                              {r.guest}
+                              {r.isOwner&&<span style={{fontSize:8.5,fontWeight:800,color:'#8b7355',background:'rgba(139,115,85,.15)',padding:'1px 6px',borderRadius:5,marginLeft:5}}>PROPIETARIO</span>}
+                            </div>
                             <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>{fmt(r.checkIn)} → {fmt(r.checkOut)} · {daysUntil(r.checkOut)} días restantes</div>
                           </div>
                         ))}
@@ -2686,9 +2697,12 @@ function UnitsScreen() {
                               const urgent = tasks.filter(t=>t.unitId===selU&&t.status!=='completado'&&t.priority==='urgente').length>0&&days<=3;
                               return (
                                 <div key={i} style={{background:'var(--surface)',border:`1px solid ${urgent?'rgba(184,50,50,.3)':'var(--border)'}`,borderRadius:10,padding:'10px 12px'}}>
-                                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
-                                    <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{r.guest}</div>
-                                    <div style={{fontSize:10,fontWeight:800,color:days<=3?'var(--urgent)':days<=7?'var(--gold)':'var(--done)',background:days<=3?'rgba(184,50,50,.1)':days<=7?'rgba(201,150,58,.1)':'rgba(45,110,78,.1)',padding:'2px 8px',borderRadius:10}}>
+                                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:6}}>
+                                    <div style={{fontSize:13,fontWeight:700,color:'var(--text)',minWidth:0}}>
+                                      {r.guest}
+                                      {r.isOwner&&<span style={{fontSize:8.5,fontWeight:800,color:'#8b7355',background:'rgba(139,115,85,.15)',padding:'1px 6px',borderRadius:5,marginLeft:5,whiteSpace:'nowrap'}}>PROPIETARIO</span>}
+                                    </div>
+                                    <div style={{fontSize:10,fontWeight:800,flexShrink:0,color:days<=3?'var(--urgent)':days<=7?'var(--gold)':'var(--done)',background:days<=3?'rgba(184,50,50,.1)':days<=7?'rgba(201,150,58,.1)':'rgba(45,110,78,.1)',padding:'2px 8px',borderRadius:10}}>
                                       {days===0?'Hoy':days===1?'Mañana':`En ${days}d`}
                                     </div>
                                   </div>
@@ -4829,10 +4843,12 @@ function ReservationsScreen() {
                             const isWknd=dow===0||dow===6;
                             let bg,border='none',title='';
                             const OUT='rgba(184,50,50,.55)', IN='#2d6e4e', BUSY='rgba(45,110,78,.25)';
-                            if (both)      { bg=`linear-gradient(90deg, ${OUT} 0 50%, ${IN} 50% 100%)`; title=`Sale: ${coutRes.guest} · Entra: ${cinRes.guest}`; }
-                            else if (cin)  { bg=IN; title=`Entra: ${cinRes.guest}`; }
+                            const OWN='rgba(139,115,85,.45)'; // bloqueo del propietario
+                            const esOwn = r => r && r.isOwner;
+                            if (both)      { bg=`linear-gradient(90deg, ${OUT} 0 50%, ${esOwn(cinRes)?OWN:IN} 50% 100%)`; title=`Sale: ${coutRes.guest} · Entra: ${cinRes.guest}`; }
+                            else if (cin)  { bg=esOwn(cinRes)?OWN:IN; title=`${esOwn(cinRes)?'Bloqueo propietario':'Entra'}: ${cinRes.guest}`; }
                             else if (cout) { bg=OUT; title=`Sale: ${coutRes.guest}`; }
-                            else if (res)  { bg=BUSY; title=res.guest; }
+                            else if (res)  { bg=esOwn(res)?OWN:BUSY; title=`${esOwn(res)?'Propietario · ':''}${res.guest}`; }
                             else           { bg=isWknd?'rgba(201,150,58,.06)':'transparent'; }
                             if (isToday)   { border='1.5px solid var(--gold)'; }
                             return (
@@ -4859,7 +4875,7 @@ function ReservationsScreen() {
                   </table>
                 </div>
                 <div style={{display:'flex',gap:14,marginTop:10,flexWrap:'wrap',padding:'0 2px'}}>
-                  {[['#2d6e4e','Check-in'],['rgba(45,110,78,.25)','Ocupada'],['rgba(184,50,50,.55)','Check-out'],['linear-gradient(90deg, rgba(184,50,50,.55) 0 50%, #2d6e4e 50% 100%)','Sale/Entra'],['transparent','Libre']].map(([c,l])=>(
+                  {[['#2d6e4e','Check-in'],['rgba(45,110,78,.25)','Ocupada'],['rgba(184,50,50,.55)','Check-out'],['linear-gradient(90deg, rgba(184,50,50,.55) 0 50%, #2d6e4e 50% 100%)','Sale/Entra'],['rgba(139,115,85,.45)','Propietario'],['transparent','Libre']].map(([c,l])=>(
                     <div key={l} style={{display:'flex',alignItems:'center',gap:6}}>
                       <div style={{width:16,height:12,borderRadius:3,background:c,border:'1px solid var(--border)'}}/>
                       <span style={{fontSize:10,color:'var(--muted)',fontWeight:600}}>{l}</span>
@@ -4877,7 +4893,10 @@ function ReservationsScreen() {
             const allYears = [...new Set(reservations.map(r=>r.checkOut.getFullYear()))].sort((a,b)=>b-a);
 
             // Filter reservations by selected year (and optionally month) — based on checkOut
-            const filtered = reservations.filter(r=>{
+            // Los bloqueos de propietario no generan ingresos: quedan fuera de
+            // totales, conteos y tarifa promedio (sí cuentan para ocupación).
+            const resPago = reservations.filter(r=>!r.isOwner);
+            const filtered = resPago.filter(r=>{
               if (r.checkOut.getFullYear()!==incYear) return false;
               if (incMonth!==null && r.checkOut.getMonth()!==incMonth) return false;
               return true;
@@ -4887,7 +4906,7 @@ function ReservationsScreen() {
 
             // Monthly breakdown for selected year — based on checkOut
             const monthlyIncome = MONTHS.map((lbl,i)=>{
-              const mRes = reservations.filter(r=>r.checkOut.getFullYear()===incYear&&r.checkOut.getMonth()===i);
+              const mRes = resPago.filter(r=>r.checkOut.getFullYear()===incYear&&r.checkOut.getMonth()===i);
               const total = mRes.reduce((s,r)=>s+parseIncome(r.income),0);
               return {lbl, total, count:mRes.length, month:i};
             });
@@ -4903,7 +4922,7 @@ function ReservationsScreen() {
 
             // Year comparison: previous year — based on checkOut
             const prevYear = incYear-1;
-            const prevTotal = reservations.filter(r=>r.checkOut.getFullYear()===prevYear)
+            const prevTotal = resPago.filter(r=>r.checkOut.getFullYear()===prevYear)
               .reduce((s,r)=>s+parseIncome(r.income),0);
             const diffPct = prevTotal>0 ? Math.round((totalIncome-prevTotal)/prevTotal*100) : null;
 
@@ -5016,7 +5035,7 @@ function ReservationsScreen() {
                     </div>
                     {/* Comparación vs mismo mes año anterior */}
                     {(()=>{
-                      const prevMonthTotal = reservations.filter(r=>r.checkOut.getFullYear()===incYear-1&&r.checkOut.getMonth()===incMonth)
+                      const prevMonthTotal = resPago.filter(r=>r.checkOut.getFullYear()===incYear-1&&r.checkOut.getMonth()===incMonth)
                         .reduce((s,r)=>s+parseIncome(r.income),0);
                       if (prevMonthTotal<=0) return null;
                       const diff = totalIncome - prevMonthTotal;
@@ -5158,7 +5177,7 @@ function ReservationsScreen() {
                       ? ((esAnioEnCurso && incMonth>=mesActual) ? 0 : totalIncome)
                       // Viendo el año: sumar reservas cuyo checkout cae en meses ya cobrados
                       : (esAnioEnCurso
-                          ? reservations.filter(r=>r.checkOut.getFullYear()===incYear && r.checkOut.getMonth()<mesActual)
+                          ? resPago.filter(r=>r.checkOut.getFullYear()===incYear && r.checkOut.getMonth()<mesActual)
                               .reduce((s,r)=>s+parseIncome(r.income),0)
                           : totalIncome);
                     const hayPendiente = cobradoIncome !== totalIncome;
@@ -5587,7 +5606,7 @@ function ReservationsScreen() {
                   </div>
                   {(()=>{
                     const nightlyByMonth = MONTHS.map((lbl,i)=>{
-                      const mRes = reservations.filter(r=>
+                      const mRes = resPago.filter(r=>
                         r.checkOut.getFullYear()===incYear && r.checkOut.getMonth()===i &&
                         (priceUnit==='all'||r.unitId===parseInt(priceUnit))
                       );
@@ -6142,8 +6161,11 @@ function ReservationsScreen() {
                     <span style={{fontWeight:700}}>{importResult.importedCanc}</span>
                   </div>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13,borderTop:'1px solid var(--border)',marginTop:4,paddingTop:8}}>
-                    <span style={{color:'var(--muted)'}}>Bloqueos del dueño (ignorados)</span>
-                    <span style={{color:'var(--muted)'}}>{importResult.stats.skippedOwner}</span>
+                    <span style={{color:'var(--muted)'}}>Bloqueos del propietario</span>
+                    <span style={{fontWeight:700,color:'#8b7355'}}>{importResult.stats.ownerBlocks}</span>
+                  </div>
+                  <div style={{fontSize:9,color:'var(--muted)',fontStyle:'italic',marginTop:2,lineHeight:1.4}}>
+                    Ocupan la unidad (cuentan para agua y verificaciones) pero no suman ingresos.
                   </div>
                   {importResult.stats.skippedUnknownUnit>0&&(
                     <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
