@@ -1048,11 +1048,21 @@ function LoginScreen() {
 }
 
 /* NEW TASK MODAL */
-function NewTaskModal({ onClose, onSaved, defaultUnitId }) {
+function NewTaskModal({ onClose, onSaved, defaultUnitId, fotoInicial }) {
   const { authFetch } = useAuth();
-  const [f, setF] = useState({unitId:1,level:'N1',category:'plomeria',title:'',description:'',priority:'normal',type:'reparacion',status:'pendiente',assignee:'',dueDate: new Date().toISOString().split('T')[0]});
+  const [f, setF] = useState({unitId: defaultUnitId ?? 1,level:'N1',category:'plomeria',title:'',description:'',priority:'normal',type:'reparacion',status:'pendiente',assignee:'',dueDate: new Date().toISOString().split('T')[0]});
   const [busy, setBusy] = useState(false);
+  const [fotos, setFotos] = useState(fotoInicial ? [fotoInicial] : []); // base64 ya comprimidas
+  const [paso, setPaso] = useState('');     // texto de progreso al guardar
   const s = (k,v) => setF(prev=>({...prev,[k]:v}));
+
+  // Sacar la foto desde la app evita que quede en la galería del teléfono:
+  // va comprimida directo a la tarea, sin ocupar memoria del dispositivo.
+  const agregarFoto = async (file) => {
+    if (!file) return;
+    const data = await compressImage(file, 1200, 0.8);
+    if (data) setFotos(prev=>[...prev, data]);
+  };
 
   const save = async () => {
     if (!f.title.trim()) return;
@@ -1069,14 +1079,31 @@ function NewTaskModal({ onClose, onSaved, defaultUnitId }) {
       assignee: f.assignee || '',
       dueDate: f.dueDate || new Date().toISOString().split('T')[0],
     };
+    setPaso(fotos.length?'Creando tarea...':'');
     const r = await authFetch('/tasks',{method:'POST',body:JSON.stringify(payload)});
     if (!r.ok) {
       const err = await r.json().catch(()=>({error:'Error desconocido'}));
       alert('Error: ' + (err.error || r.status));
-    } else {
-      onSaved();
+      setBusy(false); setPaso('');
+      return;
     }
+
+    // La tarea ya existe: subir las fotos una por una. Si alguna falla, la
+    // tarea igual queda creada y la foto se puede reintentar desde el detalle.
+    const tarea = await r.json().catch(()=>null);
+    let fallidas = 0;
+    if (tarea?.id && fotos.length) {
+      for (let i=0; i<fotos.length; i++) {
+        setPaso(`Subiendo foto ${i+1} de ${fotos.length}...`);
+        const rf = await authFetch(`/tasks/${tarea.id}/photo?type=start`,
+          {method:'POST',body:JSON.stringify({data:fotos[i]})});
+        if (!rf.ok) fallidas++;
+      }
+    }
+    if (fallidas) alert(`La tarea se creó, pero ${fallidas} foto(s) no se pudieron subir. Podés agregarlas desde el detalle de la tarea.`);
+    setPaso('');
     setBusy(false);
+    onSaved();
   };
 
   return (
@@ -1084,6 +1111,47 @@ function NewTaskModal({ onClose, onSaved, defaultUnitId }) {
       <div className="modal">
         <div className="mhandle"/>
         <div className="mtitle">Nueva Tarea</div>
+
+        {/* La cámara va primero: sacar la foto desde acá evita que quede
+            ocupando memoria en la galería del teléfono. */}
+        <div className="msec">
+          <span className="mlbl">Fotos {fotos.length>0&&<span style={{color:'var(--gold)'}}>· {fotos.length}</span>}</span>
+          {fotos.length>0&&(
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:5,marginBottom:7}}>
+              {fotos.map((src,i)=>(
+                <div key={i} style={{position:'relative'}}>
+                  <img src={src} style={{width:'100%',aspectRatio:'1',objectFit:'cover',borderRadius:8,border:'1px solid var(--border)',display:'block'}}/>
+                  <button onClick={()=>setFotos(prev=>prev.filter((_,k)=>k!==i))} disabled={busy}
+                    style={{position:'absolute',top:-4,right:-4,width:20,height:20,borderRadius:'50%',
+                      background:'rgba(184,50,50,.95)',border:'none',color:'#fff',fontSize:12,lineHeight:1,
+                      cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{display:'flex',gap:7}}>
+            <label style={{flex:2,display:'flex',alignItems:'center',justifyContent:'center',gap:7,
+              padding:'12px 8px',borderRadius:10,border:'2px dashed var(--gold)',cursor:busy?'default':'pointer',
+              background:'rgba(201,150,58,.07)',opacity:busy?.5:1}}>
+              <span style={{fontSize:20,lineHeight:1}}>📷</span>
+              <span style={{fontSize:12.5,fontWeight:800,color:'var(--gold)'}}>Tomar foto</span>
+              <input type="file" accept="image/*" capture="environment" style={{display:'none'}} disabled={busy}
+                onChange={e=>{ agregarFoto(e.target.files[0]); e.target.value=''; }}/>
+            </label>
+            <label style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:5,
+              padding:'12px 8px',borderRadius:10,border:'2px dashed var(--border)',cursor:busy?'default':'pointer',
+              background:'var(--bg)',opacity:busy?.5:1}}>
+              <span style={{fontSize:17,lineHeight:1}}>🖼️</span>
+              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>Galería</span>
+              <input type="file" accept="image/*" style={{display:'none'}} disabled={busy}
+                onChange={e=>{ agregarFoto(e.target.files[0]); e.target.value=''; }}/>
+            </label>
+          </div>
+          <div style={{fontSize:9.5,color:'var(--muted)',marginTop:5,lineHeight:1.4}}>
+            Sacando la foto desde acá no se guarda en el teléfono: va directo a la tarea.
+          </div>
+        </div>
+
         <div className="msec"><span className="mlbl">Unidad</span>
           <select className="minp msel" value={f.unitId} onChange={e=>s('unitId',e.target.value)}>
             {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
@@ -1108,7 +1176,9 @@ function NewTaskModal({ onClose, onSaved, defaultUnitId }) {
           <input className="minp" type="date" value={f.dueDate} onChange={e=>s('dueDate',e.target.value)}/></div>
         <div className="macts">
           <button className="mcancel" onClick={onClose}>Cancelar</button>
-          <button className="msave" onClick={save} disabled={busy||!f.title.trim()}>{busy?'Guardando...':'Crear Tarea'}</button>
+          <button className="msave" onClick={save} disabled={busy||!f.title.trim()}>
+            {busy ? (paso || 'Guardando...') : (fotos.length ? `Crear con ${fotos.length} foto${fotos.length!==1?'s':''}` : 'Crear Tarea')}
+          </button>
         </div>
       </div>
     </div>
@@ -1414,6 +1484,7 @@ function TasksScreen({ isDark, onThemeToggle }) {
   const [prioF,    setPrioF]    = useState('all');
   const [search,   setSearch]   = useState('');
   const [showNew,  setShowNew]  = useState(false);
+  const [fotoInicial, setFotoInicial] = useState(null);
   const [sel,      setSel]      = useState(null);
   const [assigneeF,setAssigneeF]= useState('all');
   const [showStats, setShowStats] = useState(false);
@@ -1816,10 +1887,24 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
         )}
       </div>
 
-      <button className="fab" onClick={()=>setShowNew(true)}>
+      {/* Atajo de cámara: abre la cámara y de ahí al formulario con la foto
+          ya cargada. Evita que la foto quede ocupando la galería del teléfono. */}
+      <label className="fab" style={{right:'auto',left:16,paddingLeft:14,paddingRight:14,cursor:'pointer'}}
+        title="Foto rápida">
+        <span style={{fontSize:16,lineHeight:1}}>📷</span> Foto
+        <input type="file" accept="image/*" capture="environment" style={{display:'none'}}
+          onChange={async e=>{
+            const file = e.target.files[0]; e.target.value='';
+            if (!file) return;
+            const data = await compressImage(file, 1200, 0.8);
+            if (data) { setFotoInicial(data); setShowNew(true); }
+          }}/>
+      </label>
+
+      <button className="fab" onClick={()=>{setFotoInicial(null);setShowNew(true);}}>
         <Ic d={D.plus} sz={16}/> Nueva tarea
       </button>
-      {showNew&&<NewTaskModal onClose={()=>setShowNew(false)} onSaved={()=>{setShowNew(false);reloadTasks();}}/>}
+      {showNew&&<NewTaskModal fotoInicial={fotoInicial} onClose={()=>{setShowNew(false);setFotoInicial(null);}} onSaved={()=>{setShowNew(false);setFotoInicial(null);reloadTasks();}}/>}
       {sel&&<TaskDetailModal task={sel} onClose={()=>setSel(null)} onUpdated={()=>{setSel(null);reloadTasks();}}/>}
       {showStats&&(()=>{
         const doneDate = t => {
