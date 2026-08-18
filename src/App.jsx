@@ -523,47 +523,59 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
 // extienda la estadía o cambie el monto, así que la reserva se actualiza en
 // lugar de duplicarse. Las reservas guardadas antes de que existiera ese
 // campo caen en la clave de respaldo (unidad + fechas).
-const resKey   = r => r.reservationId ? `R${r.reservationId}_${r.unitId}` : null;
+const resNum   = r => String(r.reservationId || '').trim();
+const resKey   = r => resNum(r) ? `R${resNum(r)}_${r.unitId}` : null;
 const resKeyFb = r => `F${r.unitId}_${r.checkIn.getTime()}_${r.checkOut.getTime()}`;
 
 function mergeReservations(existentes, nuevas, canceladasNuevas = []) {
-  const porClave    = new Map(); // clave definitiva → reserva
-  const claveDeFb   = new Map(); // clave de respaldo → clave definitiva
+  const porClave = new Map(); // clave definitiva → reserva
+  // Solo indexa entradas SIN número de reserva. Las que ya lo tienen no se
+  // buscan nunca por fechas: dos reservas distintas pueden compartir unidad y
+  // fechas (alguien cancela y vuelve a reservar lo mismo con un número nuevo),
+  // y emparejarlas por fecha borraría la reserva equivocada.
+  const legadoPorFecha = new Map();
   let nuevas_ = 0, actualizadas = 0, sinCambio = 0;
 
   const poner = (r, esNueva) => {
-    const k  = resKey(r) || resKeyFb(r);
-    const fb = resKeyFb(r);
-    // Si esta reserva ya estaba guardada sin número, reemplazar esa entrada
-    // en vez de crear una segunda con la clave nueva.
-    const previa = claveDeFb.get(fb);
-    if (previa && previa !== k) porClave.delete(previa);
+    const num = resNum(r);
+    const fb  = resKeyFb(r);
+    const k   = num ? resKey(r) : fb;
+
+    if (num) {
+      // Si la misma reserva estaba guardada de antes sin número, adopta el
+      // número: se reemplaza esa entrada en vez de crear una segunda.
+      const vieja = legadoPorFecha.get(fb);
+      if (vieja && vieja !== k) { porClave.delete(vieja); legadoPorFecha.delete(fb); }
+    } else {
+      legadoPorFecha.set(fb, k);
+    }
 
     if (esNueva) {
-      const anterior = porClave.get(k) || (previa ? null : undefined);
-      if (porClave.has(k) || previa) {
-        const viejo = porClave.get(k);
-        if (viejo && viejo.income === r.income && viejo.guest === r.guest) sinCambio++;
+      const previo = porClave.get(k);
+      if (previo) {
+        if (previo.income === r.income && previo.guest === r.guest) sinCambio++;
         else actualizadas++;
       } else nuevas_++;
     }
     porClave.set(k, r);
-    claveDeFb.set(fb, k);
   };
 
   (existentes||[]).forEach(r => poner(r, false));
   (nuevas||[]).forEach(r => poner(r, true));
 
-  // Una reserva que aparece como cancelada en el CSV nuevo se retira del
-  // listado: sin esto quedaría para siempre, porque fusionar nunca borra.
+  // Retirar las que aparecen canceladas en el CSV nuevo. El emparejamiento es
+  // por número de reserva: si la cancelada y la activa tienen números distintos
+  // son reservas distintas, aunque coincidan unidad y fechas.
   let canceladas = 0;
   (canceladasNuevas||[]).forEach(c => {
-    const k = resKey(c) || resKeyFb(c);
-    if (porClave.delete(k)) canceladas++;
-    else {
-      const alt = claveDeFb.get(resKeyFb(c));
-      if (alt && porClave.delete(alt)) canceladas++;
+    if (resNum(c)) {
+      if (porClave.delete(resKey(c))) canceladas++;
+      return;
     }
+    // Cancelada sin número (dato viejo): solo puede retirar una entrada que
+    // tampoco tenga número. Nunca toca una reserva ya identificada.
+    const vieja = legadoPorFecha.get(resKeyFb(c));
+    if (vieja && porClave.delete(vieja)) { legadoPorFecha.delete(resKeyFb(c)); canceladas++; }
   });
 
   return {
