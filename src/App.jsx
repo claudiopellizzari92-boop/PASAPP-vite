@@ -567,21 +567,108 @@ function mergeReservations(existentes, nuevas, canceladasNuevas = []) {
   // por número de reserva: si la cancelada y la activa tienen números distintos
   // son reservas distintas, aunque coincidan unidad y fechas.
   let canceladas = 0;
+  const retiradas = []; // detalle, para el informe de anomalías
   (canceladasNuevas||[]).forEach(c => {
-    if (resNum(c)) {
-      if (porClave.delete(resKey(c))) canceladas++;
-      return;
-    }
+    const quitar = (k) => {
+      const r = porClave.get(k);
+      if (!r) return false;
+      porClave.delete(k);
+      retiradas.push(r);
+      canceladas++;
+      return true;
+    };
+    if (resNum(c)) { quitar(resKey(c)); return; }
     // Cancelada sin número (dato viejo): solo puede retirar una entrada que
     // tampoco tenga número. Nunca toca una reserva ya identificada.
     const vieja = legadoPorFecha.get(resKeyFb(c));
-    if (vieja && porClave.delete(vieja)) { legadoPorFecha.delete(resKeyFb(c)); canceladas++; }
+    if (vieja && quitar(vieja)) legadoPorFecha.delete(resKeyFb(c));
   });
 
   return {
     lista: [...porClave.values()],
+    retiradas,
     stats: { nuevas: nuevas_, actualizadas, sinCambio, canceladas },
   };
+}
+
+// ── Detección de anomalías al importar ────────────────────────────────
+// Los fallos de importación son silenciosos: una reserva que no llega no
+// produce ningún error, simplemente no aparece. Esto los hace visibles.
+const MAX_NOCHES_RAZONABLE = 90;
+
+function detectarAnomalias({ existentes, resCsv, cancCsv, listaFinal, retiradas }) {
+  const av = [];
+  const noches = r => Math.round((r.checkOut - r.checkIn) / 86400000);
+  const money  = r => { const n = parseFloat(String(r.income||'').replace(/[^0-9.-]/g,'')); return isNaN(n)?0:n; };
+  const fecha  = d => d.toLocaleDateString('es-VE',{day:'numeric',month:'short',year:'numeric'});
+  const desc   = r => `${uname(r.unitId)} · ${r.guest||'(sin nombre)'} · ${fecha(r.checkIn)} → ${fecha(r.checkOut)}`;
+
+  // 1) Fechas imposibles ------------------------------------------------
+  const malas = resCsv.filter(r => {
+    const n = noches(r);
+    return n <= 0 || n > MAX_NOCHES_RAZONABLE;
+  });
+  malas.forEach(r => av.push({
+    nivel: noches(r) <= 0 ? 'grave' : 'aviso',
+    tipo:  noches(r) <= 0 ? 'Fechas inválidas' : 'Estadía muy larga',
+    detalle: `${desc(r)} · ${noches(r)} noche${noches(r)!==1?'s':''}`,
+    nota: noches(r) <= 0 ? 'La salida no es posterior a la entrada. Revisar en Hostaway.' : null,
+  }));
+
+  // 2) Cancelaciones que retiraron una reserva confirmada ----------------
+  (retiradas||[]).forEach(r => av.push({
+    nivel: 'aviso',
+    tipo: 'Reserva retirada por cancelación',
+    detalle: `${desc(r)}${money(r) ? ` · ${'$'+money(r).toLocaleString('en-US')}` : ''}`,
+  }));
+
+  // 3) Reservas que estaban y ya no vienen -------------------------------
+  // Solo se evalúan las que caen DENTRO del rango y de las unidades que cubre
+  // el archivo: si el CSV viene recortado, lo de afuera no es una anomalía.
+  const todasCsv = [...resCsv, ...cancCsv];
+  if (todasCsv.length > 0) {
+    const desde = Math.min(...todasCsv.map(r => r.checkIn.getTime()));
+    const hasta = Math.max(...todasCsv.map(r => r.checkOut.getTime()));
+    const unidadesCsv = new Set(todasCsv.map(r => r.unitId));
+    const numsCsv = new Set(todasCsv.map(r => String(r.reservationId||'').trim()).filter(Boolean));
+    const finalNums = new Set(listaFinal.map(r => String(r.reservationId||'').trim()).filter(Boolean));
+
+    (existentes||[]).forEach(r => {
+      const num = String(r.reservationId||'').trim();
+      if (!num) return;                                   // sin número no se puede juzgar
+      if (!unidadesCsv.has(r.unitId)) return;             // unidad fuera del archivo
+      if (r.checkIn.getTime() < desde || r.checkOut.getTime() > hasta) return; // fuera del rango
+      if (numsCsv.has(num)) return;                       // sí vino
+      if (!finalNums.has(num)) return;                    // ya fue retirada, se informa aparte
+      av.push({
+        nivel: 'aviso',
+        tipo: 'No vino en este archivo',
+        detalle: `${desc(r)}${money(r) ? ` · ${'$'+money(r).toLocaleString('en-US')}` : ''}`,
+        nota: 'Se conserva. Puede haber quedado fuera del filtro de exportación.',
+      });
+    });
+  }
+
+  // 4) Solapamientos en la lista final -----------------------------------
+  const porUnidad = {};
+  listaFinal.forEach(r => { (porUnidad[r.unitId] = porUnidad[r.unitId] || []).push(r); });
+  Object.values(porUnidad).forEach(lista => {
+    lista.sort((a,b) => a.checkIn - b.checkIn);
+    for (let i = 1; i < lista.length; i++) {
+      const a = lista[i-1], b = lista[i];
+      if (b.checkIn < a.checkOut) {  // el check-out no cuenta como noche ocupada
+        av.push({
+          nivel: 'grave',
+          tipo: 'Dos reservas a la vez',
+          detalle: `${uname(a.unitId)} · ${a.guest||'?'} (${fecha(a.checkIn)}→${fecha(a.checkOut)}) y ${b.guest||'?'} (${fecha(b.checkIn)}→${fecha(b.checkOut)})`,
+          nota: 'Revisar el listado en Hostaway: puede estar mal mapeado.',
+        });
+      }
+    }
+  });
+
+  const graves = av.filter(a => a.nivel === 'grave').length;
+  return { lista: av, graves, total: av.length };
 }
 
 // ── Parser de CSV de QuickBooks (Lista de transacciones por proveedor) ──
@@ -4670,6 +4757,21 @@ function ReservationsScreen() {
                   const cancFusion = mergeReservations(cancellations, cancCsv);
                   const canc = cancFusion.lista;
 
+                  // Los fallos de importación no dan error: hay que buscarlos.
+                  const anomalias = detectarAnomalias({
+                    existentes: reservations, resCsv, cancCsv,
+                    listaFinal: res, retiradas: fusion.retiradas,
+                  });
+                  if (anomalias.graves > 0) {
+                    const ok = confirm(
+                      `Se detectaron ${anomalias.graves} anomalía(s) grave(s) en este archivo.\n\n` +
+                      anomalias.lista.filter(a=>a.nivel==='grave').slice(0,5)
+                        .map(a=>`• ${a.tipo}: ${a.detalle}`).join('\n') +
+                      `\n\n¿Guardar igual? El detalle completo queda en el resumen.`
+                    );
+                    if (!ok) { setImporting(false); e.target.value=''; return; }
+                  }
+
                   // Calcular ingresos del año actual del CSV nuevo (snapshot)
                   const calcYearIncome = (rlist, yr) => rlist
                     .filter(r=>r.checkOut.getFullYear()===yr)
@@ -4753,7 +4855,7 @@ function ReservationsScreen() {
                     localStorage.setItem('pas_income_snapshot', JSON.stringify({
                       year: thisYr, total: newTotal, byUnit: newByUnit, resByUnit: newResByUnit, date: new Date().toLocaleDateString('es-VE')
                     }));
-                    setImportResult({ ok:true, stats, mergeStats, csvCount:resCsv.length,
+                    setImportResult({ ok:true, stats, mergeStats, anomalias, csvCount:resCsv.length,
                                       imported:res.length, importedCanc:canc.length, snapshotDiff, unitChanges, newTotal });
                   } else {
                     setImportResult({ ok:false, error:(r1.error||r2.error||'Error desconocido') });
@@ -6081,6 +6183,41 @@ function ReservationsScreen() {
               <>
                 <div style={{fontSize:34,textAlign:'center',marginBottom:6}}>✅</div>
                 <div style={{fontSize:17,fontWeight:700,fontFamily:'var(--serif)',textAlign:'center',marginBottom:14}}>Importación completa</div>
+
+                {/* Anomalías: los fallos de importación son silenciosos */}
+                {importResult.anomalias&&importResult.anomalias.total>0&&(()=>{
+                  const A = importResult.anomalias;
+                  const col = n => n==='grave' ? 'var(--urgent)' : 'var(--gold)';
+                  const bg  = n => n==='grave' ? 'rgba(184,50,50,.08)' : 'rgba(201,150,58,.07)';
+                  const bd  = n => n==='grave' ? 'rgba(184,50,50,.28)' : 'rgba(201,150,58,.25)';
+                  const orden = { grave:0, aviso:1 };
+                  const lista = [...A.lista].sort((a,b)=>orden[a.nivel]-orden[b.nivel]);
+                  return (
+                    <div style={{marginBottom:12}}>
+                      <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,fontWeight:700,marginBottom:7}}>
+                        {A.total} {A.total===1?'cosa a revisar':'cosas a revisar'}
+                        {A.graves>0&&<span style={{color:'var(--urgent)'}}> · {A.graves} grave{A.graves!==1?'s':''}</span>}
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:5,maxHeight:220,overflowY:'auto'}} className="hide-scroll">
+                        {lista.slice(0,40).map((a,i)=>(
+                          <div key={i} style={{background:bg(a.nivel),border:`1px solid ${bd(a.nivel)}`,
+                            borderRadius:9,padding:'7px 10px'}}>
+                            <div style={{fontSize:11,fontWeight:800,color:col(a.nivel)}}>
+                              {a.nivel==='grave'?'⚠ ':'• '}{a.tipo}
+                            </div>
+                            <div style={{fontSize:10.5,color:'var(--text)',marginTop:2,lineHeight:1.4}}>{a.detalle}</div>
+                            {a.nota&&<div style={{fontSize:9,color:'var(--muted)',marginTop:2,fontStyle:'italic',lineHeight:1.4}}>{a.nota}</div>}
+                          </div>
+                        ))}
+                        {lista.length>40&&(
+                          <div style={{fontSize:10,color:'var(--muted)',textAlign:'center',padding:'4px 0',fontStyle:'italic'}}>
+                            y {lista.length-40} más
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Resultado de la fusión: el CSV se suma a lo que ya había */}
                 {importResult.mergeStats&&(
