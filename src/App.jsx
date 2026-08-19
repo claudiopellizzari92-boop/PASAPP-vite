@@ -6530,6 +6530,8 @@ function InvoicesScreen() {
   const [fileName,setFileName]= useState('');
   const [filtro,  setFiltro]  = useState('all'); // 'all' | 'mbl' | 'condominio'
   const [dlBusy,  setDlBusy]  = useState('');
+  const [editInv, setEditInv] = useState(null);  // factura en edición
+  const [editBusy,setEditBusy]= useState(false);
 
   const DESTINOS = [
     {id:'mbl',        label:'MBL',        color:'#2471a3'},
@@ -6633,6 +6635,31 @@ function InvoicesScreen() {
     const r = await authFetch(`/invoices/${inv.id}`,{method:'DELETE'});
     if (r.ok || r.status===204) setList(prev=>prev.filter(x=>x.id!==inv.id));
     else alert('No se pudo borrar.');
+  };
+
+  // Editar los datos de una factura ya cargada. La imagen no se toca: si está
+  // mal la foto, se borra la factura y se vuelve a subir.
+  const guardarEdicion = async () => {
+    if (!editInv || !String(editInv.vendor||'').trim()) return;
+    setEditBusy(true);
+    const body = {
+      vendor:  String(editInv.vendor).trim(),
+      destino: editInv.destino,
+      notes:   String(editInv.notes||'').trim(),
+    };
+    const monto = parseFloat(String(editInv.amountAwg??'').replace(',','.'));
+    if (!isNaN(monto) && monto > 0) body.amountAwg = monto;
+
+    const r = await authFetch(`/invoices/${editInv.id}`,{method:'PATCH',body:JSON.stringify(body)});
+    setEditBusy(false);
+    if (r.ok) {
+      const upd = await r.json();
+      setList(prev=>prev.map(x=>x.id===upd.id?upd:x));
+      setEditInv(null);
+    } else {
+      const e = await r.json().catch(()=>({}));
+      alert(e.error || 'No se pudo guardar la factura.');
+    }
   };
 
   // Corregir el destino sin tener que borrar y volver a fotografiar
@@ -7007,8 +7034,11 @@ ${fotos}
                                         </span>
                                       )}
                                     </div>
-                                    <div style={{flex:1,minWidth:0}}>
-                                      <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{inv.vendor||'(sin proveedor)'}</div>
+                                    <div style={{flex:1,minWidth:0,cursor:'pointer'}}
+                                      onClick={()=>setEditInv({...inv})} title="Tocar para editar">
+                                      <div style={{fontSize:12,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                        {inv.vendor||'(sin proveedor)'} <span style={{fontSize:10,color:'var(--muted)',fontWeight:400}}>✎</span>
+                                      </div>
                                       {inv.amountAwg!=null&&(
                                         <div style={{fontSize:12,fontWeight:800,color:'var(--gold)',marginTop:1}}>
                                           {fmtAwg(inv.amountAwg)} <span style={{fontSize:9,fontWeight:400,color:'var(--muted)'}}>· {fmtUsd(inv.amountAwg)}</span>
@@ -7021,7 +7051,7 @@ ${fotos}
                                       {/* Corregir el destino sin volver a fotografiar */}
                                       <div style={{display:'flex',gap:4,marginTop:5}}>
                                         {DESTINOS.map(d=>(
-                                          <button key={d.id} onClick={()=>cambiarDestino(inv,d.id)}
+                                          <button key={d.id} onClick={e=>{e.stopPropagation();cambiarDestino(inv,d.id);}}
                                             disabled={inv.destino===d.id}
                                             style={{fontSize:8.5,fontWeight:800,padding:'2px 7px',borderRadius:5,
                                               cursor:inv.destino===d.id?'default':'pointer',
@@ -7050,6 +7080,78 @@ ${fotos}
           )}
         </div>
       </div>
+
+      {/* ── Editar factura ── */}
+      {editInv&&(
+        <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&!editBusy&&setEditInv(null)}>
+          <div style={{background:'var(--surface)',borderRadius:14,padding:'18px 16px',maxWidth:380,width:'93%',maxHeight:'88vh',overflowY:'auto'}} className="hide-scroll">
+            <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:12}}>Editar factura</div>
+
+            <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12}}>
+              <img src={miniatura(editInv)} alt=""
+                onClick={()=>editInv.fileType==='pdf'?window.open(editInv.photoUrl,'_blank'):setLightbox(editInv.photoUrl)}
+                style={{width:56,height:56,borderRadius:9,objectFit:'cover',border:'1px solid var(--border)',cursor:'zoom-in',flexShrink:0,background:'var(--bg)'}}/>
+              <div style={{fontSize:10,color:'var(--muted)',lineHeight:1.5}}>
+                {editInv.fileType==='pdf'?`PDF${editInv.pageCount>1?` · ${editInv.pageCount} páginas`:''}`:'Imagen'} · {fmtFecha(editInv.createdAt)}
+                <br/>Para cambiar el archivo hay que borrar la factura y subirla de nuevo.
+              </div>
+            </div>
+
+            <div style={{display:'flex',flexDirection:'column',gap:9}}>
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Proveedor</div>
+                <input className="minp" value={editInv.vendor||''} disabled={editBusy}
+                  onChange={e=>setEditInv(p=>({...p,vendor:e.target.value}))}/>
+              </div>
+
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>¿A quién se entrega?</div>
+                <div style={{display:'flex',gap:8}}>
+                  {DESTINOS.map(d=>{
+                    const on = editInv.destino===d.id;
+                    return (
+                      <button key={d.id} onClick={()=>setEditInv(p=>({...p,destino:d.id}))} disabled={editBusy}
+                        style={{flex:1,padding:'10px 8px',borderRadius:10,cursor:'pointer',fontSize:13,fontWeight:800,
+                          border:`2px solid ${on?d.color:'var(--border)'}`,
+                          background:on?`${d.color}1f`:'var(--bg)',
+                          color:on?d.color:'var(--muted)'}}>
+                        {on?'✓ ':''}{d.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Monto en florines (ƒ)</div>
+                <input className="minp" type="number" inputMode="decimal" disabled={editBusy}
+                  value={editInv.amountAwg ?? ''} onChange={e=>setEditInv(p=>({...p,amountAwg:e.target.value}))} placeholder="0.00"/>
+                {(()=>{ const m=parseFloat(String(editInv.amountAwg??'').replace(',','.'));
+                  return !isNaN(m)&&m>0 ? (
+                    <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>
+                      equivale a <strong style={{color:'var(--gold)'}}>{fmtUsd(m)}</strong> · tasa {AWG_USD}
+                    </div>
+                  ) : null; })()}
+              </div>
+
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Notas</div>
+                <input className="minp" value={editInv.notes||''} disabled={editBusy}
+                  onChange={e=>setEditInv(p=>({...p,notes:e.target.value}))} placeholder="Ej: repuestos A/C para PAS 12"/>
+              </div>
+
+              <div style={{display:'flex',gap:8,marginTop:4}}>
+                <button onClick={()=>setEditInv(null)} disabled={editBusy}
+                  style={{flex:1,background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:9,padding:'11px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Cancelar</button>
+                <button onClick={guardarEdicion} disabled={editBusy||!String(editInv.vendor||'').trim()}
+                  style={{flex:2,background:String(editInv.vendor||'').trim()?'var(--gold)':'var(--border)',color:'#1a1208',border:'none',borderRadius:9,padding:'11px',fontWeight:800,fontSize:13,cursor:'pointer'}}>
+                  {editBusy?'Guardando...':'Guardar cambios'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {lightbox&&(
         <div onClick={()=>setLightbox(null)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.93)',zIndex:200,
