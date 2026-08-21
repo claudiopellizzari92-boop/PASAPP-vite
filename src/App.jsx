@@ -2656,29 +2656,47 @@ function UnitsScreen() {
             // Misma categoría reabierta poco después de haberse cerrado: no es
             // mantenimiento normal, es una reparación que no resolvió el problema.
             const VENTANA = 45; // días
+            // Compartir categoría NO alcanza: "Electricidad" agrupa cambios de
+            // bombillo con instalaciones de lámpara, que no son la misma falla.
+            // Se exige que los títulos coincidan de verdad.
+            const raiz = w => w.slice(0,5); // tolera singular/plural y conjugaciones
             const norm = x => String(x||'').toLowerCase()
               .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ')
               .split(/\s+/).filter(w=>w.length>3);
+            // Verbos y adjetivos que aparecen en cualquier tarea: por sí solos no
+            // indican que sea la misma falla.
+            const GENERICAS = new Set(['para','cambio','cambi','revis','gener','unida','casa','apto','desde',
+              'hasta','sobre','todo','todos','limpi','insta','arreg','repar','coloc','nuevo','nueva','princ',
+              'segun','prime','cuart','frent','trase','compl','manten']);
             const parecidos = (a,b) => {
-              const A=norm(a), B=norm(b);
-              if (!A.length||!B.length) return false;
-              const comunes = A.filter(w=>B.includes(w)).length;
-              return comunes >= Math.min(2, Math.min(A.length,B.length));
+              const A = [...new Set(norm(a).map(raiz))];
+              const B = [...new Set(norm(b).map(raiz))];
+              if (!A.length || !B.length) return false;
+              const comunes = A.filter(w=>B.includes(w));
+              if (!comunes.length) return false;
+              // Una sola palabra en común alcanza si es específica (persiana,
+              // bombillo, tubería); si es genérica, hacen falta dos.
+              const especificas = comunes.filter(w=>!GENERICAS.has(w));
+              return especificas.length >= 1 || comunes.length >= 2;
             };
             const reinc = [];
+            const yaContada = new Set(); // cada tarea reaparece una sola vez
             catList.forEach(([cat])=>{
               const delCat = unitTasks.filter(t=>(t.category||'otro')===cat)
                 .map(t=>({...t,_ini:ms(t.createdAt),_fin:t.status==='completado'?ms(doneDate(t)):null}))
                 .filter(t=>t._ini).sort((a,b)=>a._ini-b._ini);
-              for (let i=0;i<delCat.length;i++){
-                const a = delCat[i];
-                if (!a._fin) continue;
-                for (let j=i+1;j<delCat.length;j++){
-                  const b = delCat[j];
-                  if (b._ini <= a._fin) continue;                  // se solapan, no es reapertura
+              for (let j=0;j<delCat.length;j++){
+                const b = delCat[j];
+                if (yaContada.has(b.id)) continue;
+                // Buscar hacia atrás la anterior más cercana que ya estaba cerrada
+                for (let i=j-1;i>=0;i--){
+                  const a = delCat[i];
+                  if (!a._fin || b._ini <= a._fin) continue;
                   const dias = Math.round((b._ini - a._fin)/dayMs);
                   if (dias > VENTANA) break;
-                  reinc.push({ cat, dias, a, b, fuerte: parecidos(a.title,b.title) });
+                  if (!parecidos(a.title, b.title)) continue;
+                  reinc.push({ cat, dias, a, b });
+                  yaContada.add(b.id);
                   break;
                 }
               }
@@ -2699,7 +2717,7 @@ function UnitsScreen() {
                       ⚠ Fallas que volvieron ({reinc.length})
                     </div>
                     <div style={{display:'flex',flexDirection:'column',gap:6}}>
-                      {reinc.slice(0,6).map((r,i)=>(
+                      {reinc.map((r,i)=>(
                         <div key={i} style={{background:'rgba(184,50,50,.06)',border:'1px solid rgba(184,50,50,.25)',
                           borderRadius:10,padding:'9px 12px'}}>
                           <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:3,flexWrap:'wrap'}}>
@@ -2708,7 +2726,6 @@ function UnitsScreen() {
                             <span style={{fontSize:10,fontWeight:700,color:'var(--urgent)',background:'rgba(184,50,50,.12)',padding:'1px 7px',borderRadius:6}}>
                               reabierta a los {r.dias} día{r.dias!==1?'s':''}
                             </span>
-                            {r.fuerte&&<span style={{fontSize:9,fontWeight:800,color:'var(--urgent)'}}>· misma falla</span>}
                           </div>
                           <div onClick={()=>setEditT(r.a)} style={{fontSize:11,color:'var(--muted)',cursor:'pointer',lineHeight:1.4}}>
                             <span style={{color:'var(--muted)'}}>Se cerró:</span> {r.a.title} <span style={{opacity:.6}}>· {fmtD(doneDate(r.a))}</span>
@@ -2720,7 +2737,7 @@ function UnitsScreen() {
                       ))}
                     </div>
                     <div style={{fontSize:9,color:'var(--muted)',marginTop:6,fontStyle:'italic'}}>
-                      Una tarea de la misma categoría abierta dentro de los {VENTANA} días de haberse cerrado la anterior.
+                      Tareas con el mismo asunto reabiertas dentro de los {VENTANA} días de haberse cerrado la anterior.
                     </div>
                   </div>
                 )}
