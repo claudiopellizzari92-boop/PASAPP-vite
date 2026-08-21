@@ -2592,7 +2592,7 @@ function UnitsScreen() {
 
           {/* Tabs: Tareas / Fotos / Disponibilidad */}
           <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginBottom:12}}>
-            {[['tasks','Tareas'],['photos','Fotos'],['availability','Reservas'],['preventivo','Preventivo']].map(([id,lbl])=>(
+            {[['tasks','Tareas'],['historial','Historial'],['photos','Fotos'],['availability','Reservas'],['preventivo','Preventivo']].map(([id,lbl])=>(
               <button key={id} onClick={()=>setUTab(id)} style={{
                 flex:1,padding:'8px 4px',fontSize:12,fontWeight:700,border:'none',background:'none',
                 color:uTab===id?'var(--gold)':'var(--muted)',cursor:'pointer',
@@ -2614,7 +2614,181 @@ function UnitsScreen() {
             })}
           </div>}
 
-          {uTab==='preventivo'?(()=>{
+          {uTab==='historial'?(()=>{
+            const dayMs = 86400000;
+            const unitTasks = tasks.filter(t=>t.unitId===selU);
+            if (unitTasks.length===0) return (
+              <div className="empty" style={{padding:'28px 0'}}>
+                <div style={{fontSize:30,marginBottom:8}}>📋</div>
+                <div className="empty-t" style={{fontSize:17}}>Sin historial</div>
+                <div className="empty-s">Esta unidad no tiene tareas registradas.</div>
+              </div>
+            );
+
+            // Fecha de cierre: última entrada del historial que marca completado
+            const doneDate = t => {
+              const h=(t.history||[]).filter(x=>/completado/i.test(x.action||'')).map(x=>x.date).filter(Boolean).sort();
+              return h.length ? h[h.length-1] : t.createdAt;
+            };
+            const ms = d => { const x=new Date(d).getTime(); return isFinite(x)?x:null; };
+            const fmtD = d => { try { return new Date(d).toLocaleDateString('es',{day:'numeric',month:'short',year:'numeric'}); } catch(e){ return String(d).slice(0,10); } };
+            const hace = d => { const t0=ms(d); if(!t0) return ''; const n=Math.floor((Date.now()-t0)/dayMs);
+              return n<=0?'hoy':n===1?'ayer':n<30?`hace ${n} días`:n<365?`hace ${Math.round(n/30)} meses`:`hace ${(n/365).toFixed(1)} años`; };
+
+            const completadas = unitTasks.filter(t=>t.status==='completado')
+              .map(t=>({...t,_done:doneDate(t)}))
+              .sort((a,b)=>(ms(b._done)||0)-(ms(a._done)||0));
+
+            // ── 1) Qué categoría falla más ──
+            const cats = {};
+            unitTasks.forEach(t=>{
+              const c = t.category || 'otro';
+              if (!cats[c]) cats[c] = { n:0, ultima:null, activas:0 };
+              cats[c].n++;
+              if (t.status!=='completado') cats[c].activas++;
+              const f = t.status==='completado' ? doneDate(t) : t.createdAt;
+              if (!cats[c].ultima || (ms(f)||0) > (ms(cats[c].ultima)||0)) cats[c].ultima = f;
+            });
+            const catList = Object.entries(cats).sort((a,b)=>b[1].n-a[1].n);
+            const maxCat = Math.max(1, ...catList.map(([,v])=>v.n));
+
+            // ── 2) Reincidencias ──
+            // Misma categoría reabierta poco después de haberse cerrado: no es
+            // mantenimiento normal, es una reparación que no resolvió el problema.
+            const VENTANA = 45; // días
+            const norm = x => String(x||'').toLowerCase()
+              .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ')
+              .split(/\s+/).filter(w=>w.length>3);
+            const parecidos = (a,b) => {
+              const A=norm(a), B=norm(b);
+              if (!A.length||!B.length) return false;
+              const comunes = A.filter(w=>B.includes(w)).length;
+              return comunes >= Math.min(2, Math.min(A.length,B.length));
+            };
+            const reinc = [];
+            catList.forEach(([cat])=>{
+              const delCat = unitTasks.filter(t=>(t.category||'otro')===cat)
+                .map(t=>({...t,_ini:ms(t.createdAt),_fin:t.status==='completado'?ms(doneDate(t)):null}))
+                .filter(t=>t._ini).sort((a,b)=>a._ini-b._ini);
+              for (let i=0;i<delCat.length;i++){
+                const a = delCat[i];
+                if (!a._fin) continue;
+                for (let j=i+1;j<delCat.length;j++){
+                  const b = delCat[j];
+                  if (b._ini <= a._fin) continue;                  // se solapan, no es reapertura
+                  const dias = Math.round((b._ini - a._fin)/dayMs);
+                  if (dias > VENTANA) break;
+                  reinc.push({ cat, dias, a, b, fuerte: parecidos(a.title,b.title) });
+                  break;
+                }
+              }
+            });
+            reinc.sort((x,y)=>x.dias-y.dias);
+
+            const catIco = c => ({electricidad:'⚡','plomería':'🚿',plomeria:'🚿',aires:'❄️',hvac:'❄️',
+              pintura:'🎨','cerrajería':'🔑',cerrajeria:'🔑',mantenimiento:'🔧',limpieza:'🧹',
+              electrodomesticos:'🔌','carpintería':'🪚',carpinteria:'🪚'})[c] || '🔩';
+
+            return (
+              <div style={{display:'flex',flexDirection:'column',gap:16,paddingBottom:20}}>
+
+                {/* Reincidencias primero: es la señal que exige acción */}
+                {reinc.length>0&&(
+                  <div>
+                    <div className="dash-section-title" style={{marginBottom:8,color:'var(--urgent)'}}>
+                      ⚠ Fallas que volvieron ({reinc.length})
+                    </div>
+                    <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                      {reinc.slice(0,6).map((r,i)=>(
+                        <div key={i} style={{background:'rgba(184,50,50,.06)',border:'1px solid rgba(184,50,50,.25)',
+                          borderRadius:10,padding:'9px 12px'}}>
+                          <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:3,flexWrap:'wrap'}}>
+                            <span style={{fontSize:13}}>{catIco(r.cat)}</span>
+                            <span style={{fontSize:11,fontWeight:800,color:'var(--urgent)',textTransform:'capitalize'}}>{r.cat}</span>
+                            <span style={{fontSize:10,fontWeight:700,color:'var(--urgent)',background:'rgba(184,50,50,.12)',padding:'1px 7px',borderRadius:6}}>
+                              reabierta a los {r.dias} día{r.dias!==1?'s':''}
+                            </span>
+                            {r.fuerte&&<span style={{fontSize:9,fontWeight:800,color:'var(--urgent)'}}>· misma falla</span>}
+                          </div>
+                          <div onClick={()=>setEditT(r.a)} style={{fontSize:11,color:'var(--muted)',cursor:'pointer',lineHeight:1.4}}>
+                            <span style={{color:'var(--muted)'}}>Se cerró:</span> {r.a.title} <span style={{opacity:.6}}>· {fmtD(doneDate(r.a))}</span>
+                          </div>
+                          <div onClick={()=>setEditT(r.b)} style={{fontSize:11.5,color:'var(--text)',fontWeight:600,cursor:'pointer',lineHeight:1.4,marginTop:2}}>
+                            <span style={{color:'var(--muted)',fontWeight:400}}>Volvió:</span> {r.b.title} <span style={{opacity:.6,fontWeight:400}}>· {fmtD(r.b.createdAt)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{fontSize:9,color:'var(--muted)',marginTop:6,fontStyle:'italic'}}>
+                      Una tarea de la misma categoría abierta dentro de los {VENTANA} días de haberse cerrado la anterior.
+                    </div>
+                  </div>
+                )}
+
+                {/* Categorías */}
+                <div>
+                  <div className="dash-section-title" style={{marginBottom:8}}>Qué falla más</div>
+                  <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                    {catList.map(([c,v])=>(
+                      <div key={c} style={{display:'flex',alignItems:'center',gap:9}}>
+                        <span style={{fontSize:14,width:20,flexShrink:0,textAlign:'center'}}>{catIco(c)}</span>
+                        <div style={{width:96,flexShrink:0,minWidth:0}}>
+                          <div style={{fontSize:11,fontWeight:700,color:'var(--text)',textTransform:'capitalize',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c}</div>
+                          <div style={{fontSize:9,color:'var(--muted)'}}>{hace(v.ultima)}</div>
+                        </div>
+                        <div style={{flex:1,height:7,background:'var(--border)',borderRadius:4,overflow:'hidden',minWidth:20}}>
+                          <div style={{height:'100%',width:(v.n/maxCat*100)+'%',borderRadius:4,
+                            background:v.activas>0?'var(--gold)':'rgba(139,115,85,.5)'}}/>
+                        </div>
+                        <div style={{flexShrink:0,textAlign:'right',width:56}}>
+                          <span style={{fontSize:13,fontWeight:800,color:'var(--text)'}}>{v.n}</span>
+                          {v.activas>0&&<span style={{fontSize:9,color:'var(--gold)',fontWeight:700}}> · {v.activas} act.</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Historial cronológico */}
+                <div>
+                  <div className="dash-section-title" style={{marginBottom:8}}>
+                    Historial · {completadas.length} completada{completadas.length!==1?'s':''}
+                  </div>
+                  {completadas.length===0?(
+                    <div style={{fontSize:11,color:'var(--muted)',textAlign:'center',padding:'10px 0'}}>Todavía no hay tareas completadas.</div>
+                  ):(
+                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                      {completadas.map(t=>{
+                        const dur = (ms(t._done)&&ms(t.createdAt)) ? Math.round((ms(t._done)-ms(t.createdAt))/dayMs) : null;
+                        const foto = t.photoComplete || t.photoStart;
+                        return (
+                          <div key={t.id} onClick={()=>setEditT(t)}
+                            style={{display:'flex',gap:10,alignItems:'center',background:'var(--surface)',
+                              border:'1px solid var(--border)',borderRadius:11,padding:'8px 11px',cursor:'pointer'}}>
+                            <div style={{width:44,flexShrink:0,textAlign:'center'}}>
+                              <div style={{fontSize:10,fontWeight:800,color:'var(--gold)',lineHeight:1.2}}>{fmtD(t._done).split(' ')[0]}</div>
+                              <div style={{fontSize:9,color:'var(--muted)',textTransform:'capitalize'}}>{fmtD(t._done).split(' ').slice(1).join(' ').replace('de ','')}</div>
+                            </div>
+                            <div style={{width:1,alignSelf:'stretch',background:'var(--border)',flexShrink:0}}/>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:12,fontWeight:650,color:'var(--text)',lineHeight:1.3}}>{t.title}</div>
+                              <div style={{fontSize:9.5,color:'var(--muted)',marginTop:2,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+                                <span style={{textTransform:'capitalize'}}>{catIco(t.category)} {t.category||'otro'}</span>
+                                {t.assignee&&<span>· {t.assignee}</span>}
+                                {dur!=null&&dur>=0&&<span>· resuelta en {dur===0?'el día':`${dur} día${dur!==1?'s':''}`}</span>}
+                              </div>
+                            </div>
+                            {foto&&<img src={foto} alt="" loading="lazy"
+                              style={{width:36,height:36,borderRadius:8,objectFit:'cover',flexShrink:0,border:'1px solid var(--border)'}}/>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })():uTab==='preventivo'?(()=>{
             if (maintTemplates===null) return (
               <div style={{fontSize:11,color:'var(--muted)',background:'var(--surface)',border:'1px dashed var(--border)',borderRadius:10,padding:'12px'}}>
                 El mantenimiento preventivo requiere actualizar el backend (tabla maint_templates + endpoints).
