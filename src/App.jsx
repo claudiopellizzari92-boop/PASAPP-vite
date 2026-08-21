@@ -2498,6 +2498,15 @@ function UnitsScreen() {
           </div>
           {/* Unit list - vertical scroll */}
           <div style={{overflowY:'auto',flex:1,scrollbarWidth:'none',msOverflowStyle:'none'}} className="hide-scroll">
+            {/* Vista general: resumen de todas las unidades a la vez */}
+            <div onClick={()=>{setSelU('ALL');setShowDone(false);}}
+              className={`utile ${selU==='ALL'?'usel':''}`}
+              style={{position:'relative',borderLeft:`2.5px solid ${selU==='ALL'?'var(--gold)':'transparent'}`,
+                borderBottom:'1px solid rgba(255,255,255,.1)'}}>
+              <div className="utile-n" style={{fontSize:15,paddingTop:3}}>▦</div>
+              <div className="utile-l">General</div>
+            </div>
+
             {filteredUnits.map(uid=>{
               const alert=getAlert(uid);
               const pend=tasks.filter(t=>t.unitId===uid&&t.status!=='completado');
@@ -2537,6 +2546,221 @@ function UnitsScreen() {
 
         {/* CONTENT */}
         <div className="ucontent">
+          {selU==='ALL'?(()=>{
+            const dayMs = 86400000;
+            const ms = d => { const x=new Date(d).getTime(); return isFinite(x)?x:null; };
+            const fmtD = d => { try { return new Date(d).toLocaleDateString('es',{day:'numeric',month:'short',year:'numeric'}); } catch(e){ return String(d).slice(0,10); } };
+            const hace = d => { const t0=ms(d); if(!t0) return 'sin registro'; const n=Math.floor((Date.now()-t0)/dayMs);
+              return n<=0?'hoy':n===1?'ayer':n<30?`hace ${n} días`:n<365?`hace ${Math.round(n/30)} meses`:`hace ${(n/365).toFixed(1)} años`; };
+            const doneDate = t => {
+              const h=(t.history||[]).filter(x=>/completado/i.test(x.action||'')).map(x=>x.date).filter(Boolean).sort();
+              return h.length ? h[h.length-1] : t.createdAt;
+            };
+            const catIco = c => ({electricidad:'⚡','plomería':'🚿',plomeria:'🚿',aires:'❄️',hvac:'❄️',
+              pintura:'🎨','cerrajería':'🔑',cerrajeria:'🔑',mantenimiento:'🔧',limpieza:'🧹',
+              electrodomesticos:'🔌','carpintería':'🪚',carpinteria:'🪚'})[c] || '🔩';
+
+            const activas   = tasks.filter(t=>t.status!=='completado');
+            const urgentes  = activas.filter(t=>t.priority==='urgente');
+            const vencidas  = activas.filter(t=>t.dueDate && new Date(t.dueDate) < new Date());
+
+            // Reincidencias en toda la propiedad (mismo criterio que por unidad)
+            const VENTANA = 45;
+            const raiz = w => w.slice(0,5);
+            const norm = x => String(x||'').toLowerCase()
+              .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ')
+              .split(/\s+/).filter(w=>w.length>3);
+            const GENERICAS = new Set(['para','cambio','cambi','revis','gener','unida','casa','apto','desde',
+              'hasta','sobre','todo','todos','limpi','insta','arreg','repar','coloc','nuevo','nueva','princ',
+              'segun','prime','cuart','frent','trase','compl','manten']);
+            const parecidos = (a,b) => {
+              const A=[...new Set(norm(a).map(raiz))], B=[...new Set(norm(b).map(raiz))];
+              if(!A.length||!B.length) return false;
+              const c=A.filter(w=>B.includes(w));
+              if(!c.length) return false;
+              return c.filter(w=>!GENERICAS.has(w)).length>=1 || c.length>=2;
+            };
+            const reincPorUnidad = {};
+            UNIT_IDS.forEach(uid=>{
+              const ut = tasks.filter(t=>t.unitId===uid);
+              const cats = [...new Set(ut.map(t=>t.category||'otro'))];
+              const ya = new Set(); let n = 0; let ultima = null;
+              cats.forEach(cat=>{
+                const d = ut.filter(t=>(t.category||'otro')===cat)
+                  .map(t=>({...t,_ini:ms(t.createdAt),_fin:t.status==='completado'?ms(doneDate(t)):null}))
+                  .filter(t=>t._ini).sort((a,b)=>a._ini-b._ini);
+                for(let j=0;j<d.length;j++){
+                  const b=d[j]; if(ya.has(b.id)) continue;
+                  for(let i=j-1;i>=0;i--){
+                    const a=d[i];
+                    if(!a._fin || b._ini<=a._fin) continue;
+                    if(Math.round((b._ini-a._fin)/dayMs) > VENTANA) break;
+                    if(!parecidos(a.title,b.title)) continue;
+                    n++; ya.add(b.id);
+                    if(!ultima || b._ini > ultima) ultima = b._ini;
+                    break;
+                  }
+                }
+              });
+              if (n>0) reincPorUnidad[uid] = { n, ultima };
+            });
+            const reincList = Object.entries(reincPorUnidad).sort((a,b)=>b[1].n-a[1].n);
+
+            // Categorías en toda la propiedad
+            const cats = {};
+            tasks.forEach(t=>{ const c=t.category||'otro'; if(!cats[c])cats[c]={n:0,activas:0}; cats[c].n++;
+              if(t.status!=='completado') cats[c].activas++; });
+            const catList = Object.entries(cats).sort((a,b)=>b[1].n-a[1].n);
+            const maxCat = Math.max(1,...catList.map(([,v])=>v.n));
+
+            // Estado por unidad: carga activa y última actividad
+            const porUnidad = UNIT_IDS.map(uid=>{
+              const ut = tasks.filter(t=>t.unitId===uid);
+              const act = ut.filter(t=>t.status!=='completado');
+              const fechas = ut.map(t=>ms(t.status==='completado'?doneDate(t):t.createdAt)).filter(Boolean);
+              return { uid, total:ut.length, activas:act.length,
+                       urgentes:act.filter(t=>t.priority==='urgente').length,
+                       ultima: fechas.length?Math.max(...fechas):null,
+                       reinc: reincPorUnidad[uid]?.n || 0 };
+            });
+            const maxAct = Math.max(1,...porUnidad.map(u=>u.activas));
+            const sinActividad = porUnidad.filter(u=>!u.ultima || (Date.now()-u.ultima)/dayMs > 60)
+              .sort((a,b)=>(a.ultima||0)-(b.ultima||0));
+
+            // Últimas completadas de toda la propiedad
+            const recientes = tasks.filter(t=>t.status==='completado')
+              .map(t=>({...t,_done:doneDate(t)}))
+              .sort((a,b)=>(ms(b._done)||0)-(ms(a._done)||0)).slice(0,12);
+
+            return (
+              <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+                <div style={{background:'var(--dark2)',padding:'14px 16px 12px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
+                  <div style={{fontFamily:'var(--serif)',fontSize:20,fontWeight:700,color:'#fff',lineHeight:1.1}}>Resumen general</div>
+                  <div style={{fontSize:11,color:'rgba(255,255,255,.4)',marginTop:2}}>
+                    {UNIT_IDS.length} unidades · {tasks.length} tareas registradas
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,marginTop:10}}>
+                    {[
+                      {n:urgentes.length,  l:'Urgentes',  c:'var(--urgent)'},
+                      {n:activas.length,   l:'Activas',   c:'var(--gold)'},
+                      {n:vencidas.length,  l:'Vencidas',  c:'#c9963a'},
+                      {n:reincList.reduce((s,[,v])=>s+v.n,0), l:'Reincidencias', c:'var(--urgent)'},
+                    ].map((k,i)=>(
+                      <div key={i} style={{background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.08)',borderRadius:10,padding:'8px 6px',textAlign:'center'}}>
+                        <div style={{fontSize:18,fontWeight:800,fontFamily:'var(--serif)',color:k.c,lineHeight:1}}>{k.n}</div>
+                        <div style={{fontSize:8,color:'rgba(255,255,255,.4)',textTransform:'uppercase',letterSpacing:.4,marginTop:4,fontWeight:700,lineHeight:1.1}}>{k.l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{flex:1,overflowY:'auto',padding:'14px 14px 30px',display:'flex',flexDirection:'column',gap:16}} className="hide-scroll">
+
+                  {reincList.length>0&&(
+                    <div>
+                      <div className="dash-section-title" style={{marginBottom:8,color:'var(--urgent)'}}>⚠ Unidades con fallas repetidas</div>
+                      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:7}}>
+                        {reincList.map(([uid,v])=>(
+                          <div key={uid} onClick={()=>{setSelU(Number(uid));setUTab('historial');}}
+                            style={{display:'flex',alignItems:'center',gap:9,background:'rgba(184,50,50,.07)',
+                              border:'1px solid rgba(184,50,50,.25)',borderRadius:10,padding:'9px 11px',cursor:'pointer'}}>
+                            <span style={{fontSize:11,fontWeight:800,color:'var(--urgent)',background:'rgba(184,50,50,.12)',padding:'3px 8px',borderRadius:6,flexShrink:0}}>{uname(Number(uid))}</span>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:12,fontWeight:800,color:'var(--urgent)'}}>{v.n} repetida{v.n!==1?'s':''}</div>
+                              <div style={{fontSize:9,color:'var(--muted)'}}>última {hace(v.ultima)}</div>
+                            </div>
+                            <span style={{color:'var(--muted)',fontSize:14}}>›</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <div className="dash-section-title" style={{marginBottom:8}}>Carga por unidad</div>
+                    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                      {porUnidad.filter(u=>u.total>0).sort((a,b)=>b.activas-a.activas||b.total-a.total).map(u=>(
+                        <div key={u.uid} onClick={()=>{setSelU(u.uid);setUTab('tasks');}}
+                          style={{display:'flex',alignItems:'center',gap:9,cursor:'pointer'}}>
+                          <div style={{width:74,flexShrink:0}}>
+                            <div style={{fontSize:11,fontWeight:700,color:'var(--gold)'}}>{uname(u.uid)}</div>
+                            <div style={{fontSize:8.5,color:'var(--muted)'}}>{hace(u.ultima)}</div>
+                          </div>
+                          <div style={{flex:1,height:7,background:'var(--border)',borderRadius:4,overflow:'hidden',minWidth:20}}>
+                            <div style={{height:'100%',width:(u.activas/maxAct*100)+'%',borderRadius:4,
+                              background:u.urgentes>0?'var(--urgent)':u.activas>0?'var(--gold)':'transparent'}}/>
+                          </div>
+                          <div style={{width:78,flexShrink:0,textAlign:'right',fontSize:10,color:'var(--muted)'}}>
+                            <strong style={{fontSize:12,color:u.activas>0?'var(--text)':'var(--muted)'}}>{u.activas}</strong> act.
+                            {u.urgentes>0&&<span style={{color:'var(--urgent)',fontWeight:800}}> · {u.urgentes}⚠</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="dash-section-title" style={{marginBottom:8}}>Qué falla más en toda la propiedad</div>
+                    <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                      {catList.map(([c,v])=>(
+                        <div key={c} style={{display:'flex',alignItems:'center',gap:9}}>
+                          <span style={{fontSize:14,width:20,flexShrink:0,textAlign:'center'}}>{catIco(c)}</span>
+                          <div style={{width:96,flexShrink:0,fontSize:11,fontWeight:700,color:'var(--text)',textTransform:'capitalize',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c}</div>
+                          <div style={{flex:1,height:7,background:'var(--border)',borderRadius:4,overflow:'hidden',minWidth:20}}>
+                            <div style={{height:'100%',width:(v.n/maxCat*100)+'%',borderRadius:4,background:v.activas>0?'var(--gold)':'rgba(139,115,85,.5)'}}/>
+                          </div>
+                          <div style={{width:56,flexShrink:0,textAlign:'right'}}>
+                            <span style={{fontSize:13,fontWeight:800,color:'var(--text)'}}>{v.n}</span>
+                            {v.activas>0&&<span style={{fontSize:9,color:'var(--gold)',fontWeight:700}}> · {v.activas}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {sinActividad.length>0&&(
+                    <div>
+                      <div className="dash-section-title" style={{marginBottom:8}}>👁 Sin actividad hace más de 60 días</div>
+                      <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                        {sinActividad.map(u=>(
+                          <div key={u.uid} onClick={()=>{setSelU(u.uid);setUTab('tasks');}}
+                            style={{display:'flex',alignItems:'center',gap:7,background:'var(--surface)',border:'1px solid var(--border)',
+                              borderRadius:9,padding:'6px 10px',cursor:'pointer'}}>
+                            <span style={{fontSize:10,fontWeight:800,color:'var(--gold)'}}>{uname(u.uid)}</span>
+                            <span style={{fontSize:9,color:'var(--muted)'}}>{u.ultima?hace(u.ultima):'sin tareas'}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{fontSize:9,color:'var(--muted)',marginTop:6,fontStyle:'italic'}}>Quizás merezcan una inspección.</div>
+                    </div>
+                  )}
+
+                  {recientes.length>0&&(
+                    <div>
+                      <div className="dash-section-title" style={{marginBottom:8}}>Últimas completadas</div>
+                      <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                        {recientes.map(t=>(
+                          <div key={t.id} onClick={()=>setEditT(t)}
+                            style={{display:'flex',gap:10,alignItems:'center',background:'var(--surface)',
+                              border:'1px solid var(--border)',borderRadius:11,padding:'8px 11px',cursor:'pointer'}}>
+                            <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(201,150,58,.1)',
+                              padding:'3px 8px',borderRadius:6,flexShrink:0}}>{uname(t.unitId)}</span>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:12,fontWeight:650,color:'var(--text)',lineHeight:1.3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.title}</div>
+                              <div style={{fontSize:9.5,color:'var(--muted)',marginTop:2}}>
+                                {catIco(t.category)} {t.category||'otro'}{t.assignee?` · ${t.assignee}`:''} · {fmtD(t._done)}
+                              </div>
+                            </div>
+                            <Ic d={D.check} sz={14} col="var(--done)"/>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })():<>
           {/* Unit header */}
           <div style={{background:'var(--dark2)',margin:'-0px',padding:'14px 16px 12px',borderBottom:'1px solid var(--border)',marginBottom:12}}>
             <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:6}}>
@@ -3225,6 +3449,7 @@ function UnitsScreen() {
               </div>
             </>
           )}
+          </>}
         </div>
       </div>
       {lightbox&&(
@@ -3237,7 +3462,7 @@ function UnitsScreen() {
           <button onClick={()=>setLightbox(null)} style={{position:'absolute',top:16,right:16,background:'rgba(255,255,255,.1)',border:'1px solid rgba(255,255,255,.15)',color:'#fff',width:36,height:36,borderRadius:50,fontSize:20,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
         </div>
       )}
-      {showNew&&<NewTaskModal onClose={()=>setShowNew(false)} onSaved={()=>{setShowNew(false);reloadTasks();}} defaultUnitId={selU}/>}
+      {showNew&&<NewTaskModal onClose={()=>setShowNew(false)} onSaved={()=>{setShowNew(false);reloadTasks();}} defaultUnitId={selU==='ALL'?undefined:selU}/>}
       {editT&&<TaskDetailModal task={editT} onClose={()=>setEditT(null)} onUpdated={()=>{setEditT(null);reloadTasks();}}/>}
     </div>
   );
