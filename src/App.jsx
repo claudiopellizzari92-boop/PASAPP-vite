@@ -7599,7 +7599,21 @@ function FindingsScreen() {
     {id:'reclamado', label:'Reclamado', color:'#c9963a'},
     {id:'resuelto',  label:'Resuelto',  color:'#2d6e4e'},
   ];
-  const CATS_F = ['limpieza','plomería','electricidad','aires','mobiliario','pintura','electrodomésticos','otro'];
+  const CATS_UNIDAD = ['limpieza','plomería','electricidad','aires','mobiliario','pintura','electrodomésticos','otro'];
+  const CATS_SERVICIO = [
+    {id:'personal_ausente', label:'Personal ausente'},
+    {id:'sin_respuesta',    label:'No responden / sin comunicación'},
+    {id:'queja_huesped',    label:'Queja de huésped'},
+    {id:'limpieza_checkin', label:'Limpieza o check-in mal hecho'},
+    {id:'otro',             label:'Otro'},
+  ];
+  const catLabel = h => h.kind==='servicio'
+    ? (CATS_SERVICIO.find(c=>c.id===h.category)?.label || h.category || 'otro')
+    : (h.category || 'otro');
+  // Los problemas de servicio no pertenecen a una unidad
+  const dondeLabel = h => h.kind==='servicio'
+    ? (h.unitId ? `Servicio · ${uname(h.unitId)}` : 'Servicio general')
+    : uname(h.unitId);
   const sevOf = x => SEV.find(s=>s.id===x) || SEV[1];
   const estOf = x => EST.find(e=>e.id===x) || EST[0];
 
@@ -7623,8 +7637,11 @@ function FindingsScreen() {
   }, [authFetch]);
   useEffect(()=>{ load(); },[load]);
 
-  const nuevo = () => setForm({ unitId:1, title:'', description:'', category:'limpieza',
-                                severity:'normal', detectedAt:hoy(), fotos:[] });
+  const nuevo = (kind='unidad') => setForm({
+    kind, unitId: kind==='servicio' ? '' : 1, guest:'', detectedTime:'',
+    title:'', description:'',
+    category: kind==='servicio' ? 'personal_ausente' : 'limpieza',
+    severity:'normal', detectedAt:hoy(), fotos:[] });
 
   const agregarFoto = async (file) => {
     if (!file) return;
@@ -7639,7 +7656,10 @@ function FindingsScreen() {
       if (form.id) {
         setPaso('Guardando...');
         const r = await authFetch(`/findings/${form.id}`,{method:'PATCH',body:JSON.stringify({
-          unitId:Number(form.unitId), title:String(form.title).trim(),
+          kind: form.kind||'unidad',
+          unitId: form.unitId ? Number(form.unitId) : null,
+          guest: String(form.guest||''), detectedTime: String(form.detectedTime||''),
+          title:String(form.title).trim(),
           description:String(form.description||''), category:form.category,
           severity:form.severity, detectedAt:form.detectedAt,
         })});
@@ -7656,7 +7676,10 @@ function FindingsScreen() {
       } else {
         setPaso((form.fotos||[]).length?'Subiendo fotos...':'Guardando...');
         const r = await authFetch('/findings',{method:'POST',body:JSON.stringify({
-          unitId:Number(form.unitId), title:String(form.title).trim(),
+          kind: form.kind||'unidad',
+          unitId: form.unitId ? Number(form.unitId) : null,
+          guest: String(form.guest||''), detectedTime: String(form.detectedTime||''),
+          title:String(form.title).trim(),
           description:String(form.description||''), category:form.category,
           severity:form.severity, detectedAt:form.detectedAt, photos:form.fotos||[],
         })});
@@ -7701,9 +7724,11 @@ function FindingsScreen() {
       ...h, b64: (await Promise.all((h.photos||[]).slice(0,4).map(toB64))).filter(Boolean),
     })));
 
-    // Agrupado por unidad, que es como se recorre la propiedad en la reunión
+    // Servicio va aparte y primero: es lo que abre la discusión. Después el
+    // recorrido por unidad, que es como se camina la propiedad.
+    const servs = conFotos.filter(h=>h.kind==='servicio');
     const porUnidad = {};
-    conFotos.forEach(h=>{ (porUnidad[h.unitId] = porUnidad[h.unitId] || []).push(h); });
+    conFotos.filter(h=>h.kind!=='servicio').forEach(h=>{ (porUnidad[h.unitId] = porUnidad[h.unitId] || []).push(h); });
     const unidades = Object.keys(porUnidad).map(Number).sort((a,b)=>a-b);
 
     const esc = x => String(x??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -7712,27 +7737,35 @@ function FindingsScreen() {
 
     const arrastra = conFotos.filter(h=>h.status!=='resuelto' && h.claimedAt && (mesesDesde(h.claimedAt)||0) >= 1);
 
+    const filaHtml = (h,i) => {
+      const sv = sevOf(h.severity), es = estOf(h.status);
+      const meses = h.claimedAt ? mesesDesde(h.claimedAt) : null;
+      return `<div class="item">
+        <div class="ih">
+          <span class="n">${i+1}</span>
+          <span class="t">${esc(h.title)}</span>
+          <span class="sev" style="color:${sv.color};border-color:${sv.color}55;background:${sv.color}14">${sv.label}</span>
+          <span class="est" style="color:${es.color}">${es.label}</span>
+        </div>
+        ${h.guest?`<div class="g">Huésped: <strong>${esc(h.guest)}</strong></div>`:''}
+        ${h.description?`<div class="d">${esc(h.description)}</div>`:''}
+        <div class="m">
+          ${esc(catLabel(h))}${h.kind==='servicio'&&h.unitId?` · ${uname(h.unitId)}`:''} · ${fmtD(h.detectedAt)}${h.detectedTime?` a las ${esc(h.detectedTime)}`:''}
+          ${h.claimedAt?` · <strong>reclamado ${fmtD(h.claimedAt)}${meses>=1?` (hace ${meses} ${meses===1?'mes':'meses'})`:''}</strong>`:''}
+          ${h.resolvedAt?` · resuelto ${fmtD(h.resolvedAt)}`:''}
+        </div>
+        ${h.b64.length?`<div class="fotos">${h.b64.map(b=>`<img src="${b}"/>`).join('')}</div>`:''}
+      </div>`;
+    };
+
+    const bloqueServicio = servs.length===0 ? '' : `<div class="uni">
+      <div class="uh">Servicio y atención <span class="uc">${servs.length} punto${servs.length!==1?'s':''}</span></div>
+      ${servs.sort((a,b)=>(ordenSev[a.severity]??1)-(ordenSev[b.severity]??1)).map(filaHtml).join('')}
+    </div>`;
+
     const bloques = unidades.map(uid=>{
       const items = porUnidad[uid].sort((a,b)=>(ordenSev[a.severity]??1)-(ordenSev[b.severity]??1));
-      const filas = items.map((h,i)=>{
-        const sv = sevOf(h.severity), es = estOf(h.status);
-        const meses = h.claimedAt ? mesesDesde(h.claimedAt) : null;
-        return `<div class="item">
-          <div class="ih">
-            <span class="n">${i+1}</span>
-            <span class="t">${esc(h.title)}</span>
-            <span class="sev" style="color:${sv.color};border-color:${sv.color}55;background:${sv.color}14">${sv.label}</span>
-            <span class="est" style="color:${es.color}">${es.label}</span>
-          </div>
-          ${h.description?`<div class="d">${esc(h.description)}</div>`:''}
-          <div class="m">
-            ${esc(h.category||'otro')} · detectado ${fmtD(h.detectedAt)}
-            ${h.claimedAt?` · <strong>reclamado ${fmtD(h.claimedAt)}${meses>=1?` (hace ${meses} ${meses===1?'mes':'meses'})`:''}</strong>`:''}
-            ${h.resolvedAt?` · resuelto ${fmtD(h.resolvedAt)}`:''}
-          </div>
-          ${h.b64.length?`<div class="fotos">${h.b64.map(b=>`<img src="${b}"/>`).join('')}</div>`:''}
-        </div>`;
-      }).join('');
+      const filas = items.map(filaHtml).join('');
       const graves = items.filter(h=>h.severity==='grave').length;
       return `<div class="uni">
         <div class="uh">${uname(uid)} <span class="uc">${items.length} punto${items.length!==1?'s':''}${graves?` · ${graves} grave${graves!==1?'s':''}`:''}</span></div>
@@ -7764,6 +7797,7 @@ function FindingsScreen() {
   .sev{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 8px;border-radius:10px;border:1px solid}
   .est{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px}
   .d{font-size:11.5px;color:#5a4a35;line-height:1.5;margin-bottom:5px}
+  .g{font-size:11px;color:#8b6d2f;margin-bottom:4px}
   .m{font-size:9.5px;color:#8b7355}
   .fotos{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
   .fotos img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;display:block;background:#f7f2eb}
@@ -7773,7 +7807,7 @@ function FindingsScreen() {
 </style></head><body>
 <div class="sub">Porta Al Sole · Reunión con Bocobay</div>
 <h1>Puntos a revisar</h1>
-<div class="meta">Generado el ${hoyLbl} · ${datos.length} punto${datos.length!==1?'s':''} en ${unidades.length} unidad${unidades.length!==1?'es':''}</div>
+<div class="meta">Generado el ${hoyLbl} · ${datos.length} punto${datos.length!==1?'s':''}${servs.length?` · ${servs.length} de servicio`:''}${unidades.length?` · ${unidades.length} unidad${unidades.length!==1?'es':''}`:''}</div>
 
 <div class="kpis">
   <div class="k"><div class="kn" style="color:#b83232">${datos.filter(h=>h.severity==='grave').length}</div><div class="kl">Graves</div></div>
@@ -7785,9 +7819,10 @@ function FindingsScreen() {
 ${arrastra.length?`<div class="alerta">
   <b>${arrastra.length} punto${arrastra.length!==1?'s'
     :''} reclamado${arrastra.length!==1?'s':''} en reuniones anteriores sigue${arrastra.length!==1?'n':''} sin resolver.</b>
-  ${arrastra.map(h=>`<br/>· ${uname(h.unitId)} — ${esc(h.title)} <i>(reclamado ${fmtD(h.claimedAt)})</i>`).join('')}
+  ${arrastra.map(h=>`<br/>· ${esc(dondeLabel(h))} — ${esc(h.title)} <i>(reclamado ${fmtD(h.claimedAt)})</i>`).join('')}
 </div>`:''}
 
+${bloqueServicio}
 ${bloques}
 
 <div class="foot">
@@ -7812,10 +7847,70 @@ ${bloques}
     if (filtro==='todos') return true;
     return h.status===filtro;
   });
+  // Los problemas de servicio se listan aparte: no pertenecen a una unidad y
+  // son los que suelen abrir la discusión en la reunión.
+  const servicios = visibles.filter(h=>h.kind==='servicio');
   const porUnidad = {};
-  visibles.forEach(h=>{ (porUnidad[h.unitId] = porUnidad[h.unitId] || []).push(h); });
+  visibles.filter(h=>h.kind!=='servicio').forEach(h=>{ (porUnidad[h.unitId] = porUnidad[h.unitId] || []).push(h); });
   const unidadesVis = Object.keys(porUnidad).map(Number).sort((a,b)=>a-b);
   const ordenSev = { grave:0, normal:1, leve:2 };
+
+  // Misma tarjeta para servicios y para unidades
+  const tarjeta = (h) => {
+    const sv = sevOf(h.severity), es = estOf(h.status);
+    const meses = h.claimedAt ? mesesDesde(h.claimedAt) : null;
+    return (
+      <div key={h.id} style={{background:'var(--surface)',border:'1px solid var(--border)',
+        borderLeft:`3px solid ${sv.color}`,borderRadius:11,padding:'10px 12px'}}>
+        <div style={{display:'flex',alignItems:'flex-start',gap:9}}>
+          {(h.photos||[]).length>0&&(
+            <img src={h.photos[0]} alt="" loading="lazy" onClick={()=>setLightbox(h.photos[0])}
+              style={{width:48,height:48,borderRadius:8,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
+          )}
+          <div style={{flex:1,minWidth:0,cursor:'pointer'}}
+            onClick={()=>setForm({...h, unitId:h.unitId??'', detectedAt:h.detectedAt||hoy(), fotos:[]})}>
+            <div style={{fontSize:12.5,fontWeight:700,color:'var(--text)',lineHeight:1.3}}>
+              {h.title} <span style={{fontSize:10,color:'var(--muted)',fontWeight:400}}>✎</span>
+            </div>
+            {h.guest&&(
+              <div style={{fontSize:10.5,color:'var(--gold)',fontWeight:600,marginTop:2}}>👤 {h.guest}</div>
+            )}
+            {h.description&&<div style={{fontSize:10.5,color:'var(--muted)',marginTop:2,lineHeight:1.4,
+              overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{h.description}</div>}
+            <div style={{display:'flex',gap:6,alignItems:'center',marginTop:5,flexWrap:'wrap'}}>
+              <span style={{fontSize:8.5,fontWeight:800,color:sv.color,background:`${sv.color}1a`,
+                padding:'2px 7px',borderRadius:5,textTransform:'uppercase',letterSpacing:.3}}>{sv.label}</span>
+              {h.kind==='servicio'&&h.unitId&&(
+                <span style={{fontSize:9,fontWeight:700,color:'var(--muted)'}}>{uname(h.unitId)}</span>
+              )}
+              <span style={{fontSize:9.5,color:'var(--muted)'}}>{catLabel(h)}</span>
+              <span style={{fontSize:9.5,color:'var(--muted)'}}>· {fmtD(h.detectedAt)}{h.detectedTime?` ${h.detectedTime}`:''}</span>
+              {(h.photos||[]).length>1&&<span style={{fontSize:9,color:'var(--muted)'}}>· {h.photos.length} fotos</span>}
+            </div>
+            {meses>=1&&h.status!=='resuelto'&&(
+              <div style={{fontSize:9.5,fontWeight:700,color:'var(--urgent)',marginTop:4}}>
+                ⚠ Reclamado hace {meses} {meses===1?'mes':'meses'} y sigue abierto
+              </div>
+            )}
+          </div>
+          <button onClick={()=>borrar(h)} title="Borrar"
+            style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:15,padding:'2px 4px',flexShrink:0}}>×</button>
+        </div>
+        <div style={{display:'flex',gap:4,marginTop:8}}>
+          {EST.map(e=>(
+            <button key={e.id} onClick={()=>cambiarEstado(h,e.id)} disabled={h.status===e.id}
+              style={{flex:1,fontSize:9.5,fontWeight:800,padding:'5px 4px',borderRadius:7,
+                cursor:h.status===e.id?'default':'pointer',
+                border:`1px solid ${h.status===e.id?e.color:'var(--border)'}`,
+                background:h.status===e.id?`${e.color}1a`:'transparent',
+                color:h.status===e.id?e.color:'var(--muted)'}}>
+              {h.status===e.id?'✓ ':''}{e.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const abiertos = (Array.isArray(list)?list:[]).filter(h=>h.status!=='resuelto');
   const graves   = abiertos.filter(h=>h.severity==='grave');
@@ -7898,6 +7993,16 @@ ${bloques}
                 </div>
               ):(
                 <div style={{display:'flex',flexDirection:'column',gap:14}}>
+                  {servicios.length>0&&(
+                    <div>
+                      <div className="dash-section-title" style={{marginBottom:7}}>
+                        🛎️ Servicio <span style={{color:'var(--muted)',fontWeight:400}}>· {servicios.length}</span>
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                        {servicios.sort((a,b)=>(ordenSev[a.severity]??1)-(ordenSev[b.severity]??1)).map(h=>tarjeta(h))}
+                      </div>
+                    </div>
+                  )}
                   {unidadesVis.map(uid=>{
                     const items = porUnidad[uid].sort((a,b)=>(ordenSev[a.severity]??1)-(ordenSev[b.severity]??1));
                     return (
@@ -7906,54 +8011,7 @@ ${bloques}
                           {uname(uid)} <span style={{color:'var(--muted)',fontWeight:400}}>· {items.length}</span>
                         </div>
                         <div style={{display:'flex',flexDirection:'column',gap:6}}>
-                          {items.map(h=>{
-                            const sv = sevOf(h.severity), es = estOf(h.status);
-                            const meses = h.claimedAt ? mesesDesde(h.claimedAt) : null;
-                            return (
-                              <div key={h.id} style={{background:'var(--surface)',border:'1px solid var(--border)',
-                                borderLeft:`3px solid ${sv.color}`,borderRadius:11,padding:'10px 12px'}}>
-                                <div style={{display:'flex',alignItems:'flex-start',gap:9}}>
-                                  {(h.photos||[]).length>0&&(
-                                    <img src={h.photos[0]} alt="" loading="lazy" onClick={()=>setLightbox(h.photos[0])}
-                                      style={{width:48,height:48,borderRadius:8,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
-                                  )}
-                                  <div style={{flex:1,minWidth:0,cursor:'pointer'}}
-                                    onClick={()=>setForm({...h, detectedAt:h.detectedAt||hoy(), fotos:[]})}>
-                                    <div style={{fontSize:12.5,fontWeight:700,color:'var(--text)',lineHeight:1.3}}>
-                                      {h.title} <span style={{fontSize:10,color:'var(--muted)',fontWeight:400}}>✎</span>
-                                    </div>
-                                    {h.description&&<div style={{fontSize:10.5,color:'var(--muted)',marginTop:2,lineHeight:1.4,
-                                      overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{h.description}</div>}
-                                    <div style={{display:'flex',gap:6,alignItems:'center',marginTop:5,flexWrap:'wrap'}}>
-                                      <span style={{fontSize:8.5,fontWeight:800,color:sv.color,background:`${sv.color}1a`,
-                                        padding:'2px 7px',borderRadius:5,textTransform:'uppercase',letterSpacing:.3}}>{sv.label}</span>
-                                      <span style={{fontSize:9.5,color:'var(--muted)',textTransform:'capitalize'}}>{h.category||'otro'}</span>
-                                      <span style={{fontSize:9.5,color:'var(--muted)'}}>· {fmtD(h.detectedAt)}</span>
-                                      {(h.photos||[]).length>1&&<span style={{fontSize:9,color:'var(--muted)'}}>· {h.photos.length} fotos</span>}
-                                    </div>
-                                    {meses>=1&&h.status!=='resuelto'&&(
-                                      <div style={{fontSize:9.5,fontWeight:700,color:'var(--urgent)',marginTop:4}}>
-                                        ⚠ Reclamado hace {meses} {meses===1?'mes':'meses'} y sigue abierto
-                                      </div>
-                                    )}
-                                  </div>
-                                  <button onClick={()=>borrar(h)} title="Borrar"
-                                    style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:15,padding:'2px 4px',flexShrink:0}}>×</button>
-                                </div>
-                                <div style={{display:'flex',gap:4,marginTop:8}}>
-                                  {EST.map(e=>(
-                                    <button key={e.id} onClick={()=>cambiarEstado(h,e.id)} disabled={h.status===e.id}
-                                      style={{flex:1,fontSize:9.5,fontWeight:800,padding:'5px 4px',borderRadius:7,
-                                        cursor:h.status===e.id?'default':'pointer',
-                                        border:`1px solid ${h.status===e.id?e.color:'var(--border)'}`,
-                                        background:h.status===e.id?`${e.color}1a`:'transparent',
-                                        color:h.status===e.id?e.color:'var(--muted)'}}>
-                                      {h.status===e.id?'✓ ':''}{e.label}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            );
+                          {items.map(h=>tarjeta(h))}
                           })}
                         </div>
                       </div>
@@ -7966,7 +8024,17 @@ ${bloques}
         </div>
       </div>
 
-      {list!==false&&<button className="fab" onClick={nuevo}><Ic d={D.plus} sz={16}/> Hallazgo</button>}
+      {list!==false&&(
+        <>
+          <button className="fab" style={{right:'auto',left:16,paddingLeft:14,paddingRight:14}}
+            onClick={()=>nuevo('servicio')} title="Problema de servicio">
+            🛎️ Servicio
+          </button>
+          <button className="fab" onClick={()=>nuevo('unidad')}>
+            <Ic d={D.plus} sz={16}/> En unidad
+          </button>
+        </>
+      )}
 
       {/* Alta / edición */}
       {form&&(
@@ -8015,16 +8083,56 @@ ${bloques}
               </div>
             </div>
 
-            <div className="msec"><span className="mlbl">Unidad</span>
+            <div className="msec"><span className="mlbl">Tipo de problema</span>
+              <div style={{display:'flex',gap:8}}>
+                {[{id:'unidad',label:'En una unidad',ico:'🏠'},{id:'servicio',label:'De servicio',ico:'🛎️'}].map(t=>{
+                  const on = (form.kind||'unidad')===t.id;
+                  return (
+                    <button key={t.id} disabled={busy}
+                      onClick={()=>setForm(p=>({...p, kind:t.id,
+                        unitId: t.id==='servicio' ? '' : (p.unitId||1),
+                        category: t.id==='servicio' ? 'personal_ausente' : 'limpieza'}))}
+                      style={{flex:1,padding:'11px 8px',borderRadius:10,cursor:'pointer',fontSize:12,fontWeight:800,
+                        border:`2px solid ${on?'var(--gold)':'var(--border)'}`,
+                        background:on?'rgba(201,150,58,.14)':'var(--bg)',
+                        color:on?'var(--gold)':'var(--muted)'}}>
+                      {t.ico} {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{fontSize:9.5,color:'var(--muted)',marginTop:5,lineHeight:1.4}}>
+                {(form.kind||'unidad')==='servicio'
+                  ? 'Fallas de Bocobay: personal ausente, sin respuesta, quejas de huéspedes.'
+                  : 'Algo mal en un apartamento: limpieza, mantenimiento, equipos.'}
+              </div>
+            </div>
+
+            <div className="msec">
+              <span className="mlbl">Unidad{(form.kind||'unidad')==='servicio'?' (opcional)':''}</span>
               <select className="minp msel" value={form.unitId} disabled={busy}
                 onChange={e=>setForm(p=>({...p,unitId:e.target.value}))}>
+                {(form.kind||'unidad')==='servicio'&&<option value="">General / recepción</option>}
                 {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
               </select></div>
 
-            <div className="msec"><span className="mlbl">Qué encontró</span>
+            <div className="msec"><span className="mlbl">Qué pasó</span>
               <input className="minp" value={form.title} disabled={busy}
                 onChange={e=>setForm(p=>({...p,title:e.target.value}))}
-                placeholder="Ej: Filtro del A/C sucio, sábanas manchadas..."/></div>
+                placeholder={(form.kind||'unidad')==='servicio'
+                  ? 'Ej: No había nadie en recepción'
+                  : 'Ej: Filtro del A/C sucio, sábanas manchadas...'}/></div>
+
+            {(form.kind||'unidad')==='servicio'&&(
+              <div className="msec"><span className="mlbl">Huésped que se quejó (opcional)</span>
+                <input className="minp" value={form.guest||''} disabled={busy}
+                  onChange={e=>setForm(p=>({...p,guest:e.target.value}))}
+                  placeholder="Nombre del huésped"/>
+                <div style={{fontSize:9.5,color:'var(--muted)',marginTop:4,lineHeight:1.4}}>
+                  En la reunión pesa más un caso concreto que «un huésped se quejó».
+                </div>
+              </div>
+            )}
 
             <div className="msec"><span className="mlbl">Detalle (opcional)</span>
               <input className="minp" value={form.description||''} disabled={busy}
@@ -8047,12 +8155,21 @@ ${bloques}
             <div className="msec"><span className="mlbl">Categoría</span>
               <select className="minp msel" value={form.category} disabled={busy}
                 onChange={e=>setForm(p=>({...p,category:e.target.value}))}>
-                {CATS_F.map(c=><option key={c} value={c}>{c}</option>)}
+                {(form.kind||'unidad')==='servicio'
+                  ? CATS_SERVICIO.map(c=><option key={c.id} value={c.id}>{c.label}</option>)
+                  : CATS_UNIDAD.map(c=><option key={c} value={c}>{c}</option>)}
               </select></div>
 
-            <div className="msec"><span className="mlbl">Fecha en que lo detectó</span>
-              <input className="minp" type="date" value={form.detectedAt} disabled={busy}
-                onChange={e=>setForm(p=>({...p,detectedAt:e.target.value}))}/></div>
+            <div className="msec">
+              <span className="mlbl">Cuándo pasó</span>
+              <div style={{display:'flex',gap:8}}>
+                <input className="minp" style={{flex:2}} type="date" value={form.detectedAt} disabled={busy}
+                  onChange={e=>setForm(p=>({...p,detectedAt:e.target.value}))}/>
+                <input className="minp" style={{flex:1}} type="time" value={form.detectedTime||''} disabled={busy}
+                  onChange={e=>setForm(p=>({...p,detectedTime:e.target.value}))}/>
+              </div>
+              <div style={{fontSize:9.5,color:'var(--muted)',marginTop:4}}>La hora es opcional.</div>
+            </div>
 
             {err&&(
               <div style={{background:'var(--urgent-bg)',border:'1px solid var(--urgent)',borderRadius:9,
