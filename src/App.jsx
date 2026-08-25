@@ -8126,12 +8126,35 @@ function App() {
 
   return (
     <div className="app">
+      {/* Con 8 pestañas la barra ya no entra en pantallas angostas: se vuelve
+          deslizable en vez de apretar los rótulos hasta cortarlos.
+          flex:1 0 auto hace que se repartan el ancho cuando sobra espacio y
+          conserven su tamaño mínimo cuando falta. */}
+      <style>{`
+        .nav{
+          overflow-x:auto;
+          overflow-y:hidden;
+          flex-wrap:nowrap;
+          justify-content:flex-start;
+          scrollbar-width:none;
+          -ms-overflow-style:none;
+          -webkit-overflow-scrolling:touch;
+          scroll-behavior:smooth;
+        }
+        .nav::-webkit-scrollbar{display:none}
+        .nav .nav-item{
+          flex:1 0 auto;
+          min-width:64px;
+        }
+      `}</style>
       <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
         {screens[tab]||screens.tasks}
       </div>
       <nav className="nav">
         {tabs.map(t=>(
-          <button key={t.id} className={`nav-item ${tab===t.id?'active':''}`} onClick={()=>setTab(t.id)}>
+          <button key={t.id} className={`nav-item ${tab===t.id?'active':''}`}
+            ref={el=>{ if(el && tab===t.id) el.scrollIntoView({block:'nearest',inline:'nearest'}); }}
+            onClick={()=>setTab(t.id)}>
             {t.id==='dashboard'&&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>}
             {t.id==='tasks'   &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>}
             {t.id==='units'   &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>}
