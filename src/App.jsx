@@ -7582,6 +7582,505 @@ ${fotos}
   );
 }
 
+/* FINDINGS SCREEN — hallazgos sobre el mantenimiento de Bocobay */
+// Registro separado de las tareas: una tarea es algo que hace Ricardo, un
+// hallazgo es algo que debe resolver Bocobay. Ciclos de vida distintos.
+function FindingsScreen() {
+  const { user, authFetch } = useAuth();
+  const isAdmin = user?.username === 'admin';
+
+  const SEV = [
+    {id:'leve',   label:'Leve',   color:'#2d6e4e'},
+    {id:'normal', label:'Normal', color:'#c9963a'},
+    {id:'grave',  label:'Grave',  color:'#b83232'},
+  ];
+  const EST = [
+    {id:'pendiente', label:'Pendiente', color:'#b83232'},
+    {id:'reclamado', label:'Reclamado', color:'#c9963a'},
+    {id:'resuelto',  label:'Resuelto',  color:'#2d6e4e'},
+  ];
+  const CATS_F = ['limpieza','plomería','electricidad','aires','mobiliario','pintura','electrodomésticos','otro'];
+  const sevOf = x => SEV.find(s=>s.id===x) || SEV[1];
+  const estOf = x => EST.find(e=>e.id===x) || EST[0];
+
+  const hoy = () => new Date().toISOString().slice(0,10);
+  const [list,   setList]   = useState(null);   // null cargando · false backend viejo
+  const [form,   setForm]   = useState(null);   // hallazgo en alta/edición
+  const [busy,   setBusy]   = useState(false);
+  const [paso,   setPaso]   = useState('');
+  const [err,    setErr]    = useState('');
+  const [filtro, setFiltro] = useState('abiertos'); // abiertos | todos | pendiente | reclamado | resuelto
+  const [unidadF,setUnidadF]= useState('all');
+  const [lightbox,setLightbox]=useState(null);
+  const [repBusy,setRepBusy]= useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await authFetch('/findings');
+      if (r.status===404) { setList(false); return; }
+      setList(r.ok ? await r.json() : []);
+    } catch { setList([]); }
+  }, [authFetch]);
+  useEffect(()=>{ load(); },[load]);
+
+  const nuevo = () => setForm({ unitId:1, title:'', description:'', category:'limpieza',
+                                severity:'normal', detectedAt:hoy(), fotos:[] });
+
+  const agregarFoto = async (file) => {
+    if (!file) return;
+    const data = await compressImage(file, 1400, 0.82);
+    if (data) setForm(p=>({...p, fotos:[...(p.fotos||[]), data]}));
+  };
+
+  const guardar = async () => {
+    if (!form || !String(form.title).trim()) return;
+    setBusy(true); setErr('');
+    try {
+      if (form.id) {
+        setPaso('Guardando...');
+        const r = await authFetch(`/findings/${form.id}`,{method:'PATCH',body:JSON.stringify({
+          unitId:Number(form.unitId), title:String(form.title).trim(),
+          description:String(form.description||''), category:form.category,
+          severity:form.severity, detectedAt:form.detectedAt,
+        })});
+        if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || 'No se pudo guardar');
+        const upd = await r.json();
+        // Fotos nuevas agregadas durante la edición
+        let actual = upd;
+        for (let i=0;i<(form.fotos||[]).length;i++){
+          setPaso(`Subiendo foto ${i+1} de ${form.fotos.length}...`);
+          const rf = await authFetch(`/findings/${form.id}/photo`,{method:'POST',body:JSON.stringify({data:form.fotos[i]})});
+          if (rf.ok) actual = await rf.json();
+        }
+        setList(prev=>prev.map(x=>x.id===actual.id?actual:x));
+      } else {
+        setPaso((form.fotos||[]).length?'Subiendo fotos...':'Guardando...');
+        const r = await authFetch('/findings',{method:'POST',body:JSON.stringify({
+          unitId:Number(form.unitId), title:String(form.title).trim(),
+          description:String(form.description||''), category:form.category,
+          severity:form.severity, detectedAt:form.detectedAt, photos:form.fotos||[],
+        })});
+        if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || 'No se pudo guardar');
+        const creado = await r.json();
+        setList(prev=>[creado, ...(Array.isArray(prev)?prev:[])]);
+      }
+      setForm(null);
+    } catch(e) { setErr(e.message || 'No se pudo conectar'); }
+    setBusy(false); setPaso('');
+  };
+
+  const cambiarEstado = async (h, estado) => {
+    const r = await authFetch(`/findings/${h.id}`,{method:'PATCH',body:JSON.stringify({status:estado})});
+    if (r.ok) { const upd = await r.json(); setList(prev=>prev.map(x=>x.id===upd.id?upd:x)); }
+    else alert('No se pudo cambiar el estado.');
+  };
+
+  const borrar = async (h) => {
+    if (!confirm(`¿Borrar el hallazgo "${h.title}"?`)) return;
+    const r = await authFetch(`/findings/${h.id}`,{method:'DELETE'});
+    if (r.ok || r.status===204) setList(prev=>prev.filter(x=>x.id!==h.id));
+    else alert('No se pudo borrar.');
+  };
+
+  const fmtD = d => { try { return new Date(d+'T12:00:00').toLocaleDateString('es-VE',{day:'numeric',month:'short',year:'numeric'}); } catch(e){ return String(d||''); } };
+  const diasDesde = d => { const t=new Date(d+'T12:00:00').getTime(); if(!isFinite(t)) return null; return Math.floor((Date.now()-t)/86400000); };
+  const mesesDesde = d => { const n=diasDesde(d); return n==null?null:Math.round(n/30); };
+
+  // ── Reporte para la reunión con Bocobay ──
+  const generarReporte = async (soloAbiertos) => {
+    const datos = (list||[]).filter(h=>soloAbiertos ? h.status!=='resuelto' : true);
+    if (datos.length===0) { alert('No hay hallazgos para incluir en el reporte.'); return; }
+    setRepBusy(true);
+
+    const toB64 = async url => {
+      try { const r=await fetch(url); const b=await r.blob();
+        return await new Promise(res=>{const rd=new FileReader();rd.onload=()=>res(rd.result);rd.readAsDataURL(b);});
+      } catch { return null; }
+    };
+    const conFotos = await Promise.all(datos.map(async h=>({
+      ...h, b64: (await Promise.all((h.photos||[]).slice(0,4).map(toB64))).filter(Boolean),
+    })));
+
+    // Agrupado por unidad, que es como se recorre la propiedad en la reunión
+    const porUnidad = {};
+    conFotos.forEach(h=>{ (porUnidad[h.unitId] = porUnidad[h.unitId] || []).push(h); });
+    const unidades = Object.keys(porUnidad).map(Number).sort((a,b)=>a-b);
+
+    const esc = x => String(x??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const ordenSev = { grave:0, normal:1, leve:2 };
+    const hoyLbl = new Date().toLocaleDateString('es-VE',{day:'numeric',month:'long',year:'numeric'});
+
+    const arrastra = conFotos.filter(h=>h.status!=='resuelto' && h.claimedAt && (mesesDesde(h.claimedAt)||0) >= 1);
+
+    const bloques = unidades.map(uid=>{
+      const items = porUnidad[uid].sort((a,b)=>(ordenSev[a.severity]??1)-(ordenSev[b.severity]??1));
+      const filas = items.map((h,i)=>{
+        const sv = sevOf(h.severity), es = estOf(h.status);
+        const meses = h.claimedAt ? mesesDesde(h.claimedAt) : null;
+        return `<div class="item">
+          <div class="ih">
+            <span class="n">${i+1}</span>
+            <span class="t">${esc(h.title)}</span>
+            <span class="sev" style="color:${sv.color};border-color:${sv.color}55;background:${sv.color}14">${sv.label}</span>
+            <span class="est" style="color:${es.color}">${es.label}</span>
+          </div>
+          ${h.description?`<div class="d">${esc(h.description)}</div>`:''}
+          <div class="m">
+            ${esc(h.category||'otro')} · detectado ${fmtD(h.detectedAt)}
+            ${h.claimedAt?` · <strong>reclamado ${fmtD(h.claimedAt)}${meses>=1?` (hace ${meses} ${meses===1?'mes':'meses'})`:''}</strong>`:''}
+            ${h.resolvedAt?` · resuelto ${fmtD(h.resolvedAt)}`:''}
+          </div>
+          ${h.b64.length?`<div class="fotos">${h.b64.map(b=>`<img src="${b}"/>`).join('')}</div>`:''}
+        </div>`;
+      }).join('');
+      const graves = items.filter(h=>h.severity==='grave').length;
+      return `<div class="uni">
+        <div class="uh">${uname(uid)} <span class="uc">${items.length} punto${items.length!==1?'s':''}${graves?` · ${graves} grave${graves!==1?'s':''}`:''}</span></div>
+        ${filas}
+      </div>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Hallazgos Bocobay — ${hoyLbl}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Georgia,serif;background:#fff;color:#1a1208;padding:30px;max-width:840px;margin:0 auto}
+  .sub{font-size:10px;color:#8b7355;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:4px}
+  h1{font-size:25px;margin-bottom:3px}
+  .meta{font-size:12px;color:#8b7355;margin-bottom:18px}
+  .kpis{display:flex;gap:10px;margin-bottom:20px}
+  .k{flex:1;border:1px solid #e4d9c8;border-radius:9px;padding:11px 8px;text-align:center;background:#fbf9f4}
+  .kn{font-size:20px;font-weight:800}
+  .kl{font-size:8px;color:#8b7355;text-transform:uppercase;letter-spacing:1px;margin-top:3px}
+  .alerta{background:#fdf3f3;border:1px solid #e2b8b8;border-left:4px solid #b83232;border-radius:6px;padding:11px 13px;margin-bottom:20px;font-size:11.5px;line-height:1.6}
+  .alerta b{color:#b83232}
+  .uni{margin-bottom:20px;page-break-inside:avoid}
+  .uh{font-size:15px;font-weight:700;color:#1a1208;border-bottom:2px solid #c9963a;padding-bottom:5px;margin-bottom:9px}
+  .uc{font-size:10px;font-weight:400;color:#8b7355;letter-spacing:.3px}
+  .item{border:1px solid #e4d9c8;border-radius:8px;padding:10px 12px;margin-bottom:8px;page-break-inside:avoid}
+  .ih{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+  .n{font-size:10px;font-weight:800;color:#c9963a}
+  .t{font-size:13px;font-weight:700;flex:1;min-width:180px}
+  .sev{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:2px 8px;border-radius:10px;border:1px solid}
+  .est{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px}
+  .d{font-size:11.5px;color:#5a4a35;line-height:1.5;margin-bottom:5px}
+  .m{font-size:9.5px;color:#8b7355}
+  .fotos{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+  .fotos img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;display:block;background:#f7f2eb}
+  .foot{margin-top:26px;padding-top:12px;border-top:1px solid #e4d9c8;font-size:9px;color:#a99a80;display:flex;justify-content:space-between}
+  @media print{body{padding:14px}@page{margin:1.2cm}
+    .k,.item,.alerta,.uh{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style></head><body>
+<div class="sub">Porta Al Sole · Reunión con Bocobay</div>
+<h1>Puntos a revisar</h1>
+<div class="meta">Generado el ${hoyLbl} · ${datos.length} punto${datos.length!==1?'s':''} en ${unidades.length} unidad${unidades.length!==1?'es':''}</div>
+
+<div class="kpis">
+  <div class="k"><div class="kn" style="color:#b83232">${datos.filter(h=>h.severity==='grave').length}</div><div class="kl">Graves</div></div>
+  <div class="k"><div class="kn" style="color:#b83232">${datos.filter(h=>h.status==='pendiente').length}</div><div class="kl">Sin reclamar</div></div>
+  <div class="k"><div class="kn" style="color:#c9963a">${datos.filter(h=>h.status==='reclamado').length}</div><div class="kl">Ya reclamados</div></div>
+  <div class="k"><div class="kn" style="color:#2d6e4e">${datos.filter(h=>h.status==='resuelto').length}</div><div class="kl">Resueltos</div></div>
+</div>
+
+${arrastra.length?`<div class="alerta">
+  <b>${arrastra.length} punto${arrastra.length!==1?'s'
+    :''} reclamado${arrastra.length!==1?'s':''} en reuniones anteriores sigue${arrastra.length!==1?'n':''} sin resolver.</b>
+  ${arrastra.map(h=>`<br/>· ${uname(h.unitId)} — ${esc(h.title)} <i>(reclamado ${fmtD(h.claimedAt)})</i>`).join('')}
+</div>`:''}
+
+${bloques}
+
+<div class="foot">
+  <span>Porta Al Sole Condos · Aruba</span>
+  <span>Documento interno de seguimiento</span>
+</div>
+<script>window.onload=()=>window.print()<\/script>
+</body></html>`;
+
+    const blob = new Blob([html],{type:'text/html'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `hallazgos-bocobay-${hoy()}.html`;
+    a.click();
+    setRepBusy(false);
+  };
+
+  // ── Filtrado y agrupación ──
+  const visibles = (Array.isArray(list)?list:[]).filter(h=>{
+    if (unidadF!=='all' && h.unitId!==Number(unidadF)) return false;
+    if (filtro==='abiertos') return h.status!=='resuelto';
+    if (filtro==='todos') return true;
+    return h.status===filtro;
+  });
+  const porUnidad = {};
+  visibles.forEach(h=>{ (porUnidad[h.unitId] = porUnidad[h.unitId] || []).push(h); });
+  const unidadesVis = Object.keys(porUnidad).map(Number).sort((a,b)=>a-b);
+  const ordenSev = { grave:0, normal:1, leve:2 };
+
+  const abiertos = (Array.isArray(list)?list:[]).filter(h=>h.status!=='resuelto');
+  const graves   = abiertos.filter(h=>h.severity==='grave');
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+      <div className="header">
+        <div className="header-title">Bocobay</div>
+        <div style={{fontSize:11,color:'rgba(255,255,255,.32)'}}>
+          {Array.isArray(list)?`${abiertos.length} abierto${abiertos.length!==1?'s':''}`:''}
+        </div>
+      </div>
+
+      <div className="page">
+        <div style={{padding:'12px 13px 90px',display:'flex',flexDirection:'column',gap:13}}>
+
+          {list===false&&(
+            <div style={{background:'rgba(201,150,58,.06)',border:'1px dashed rgba(201,150,58,.3)',borderRadius:10,padding:'12px 14px',fontSize:11,color:'var(--muted)',lineHeight:1.5}}>
+              ⚙️ Esta sección requiere actualizar el backend (tabla <code>findings</code> + endpoints).
+            </div>
+          )}
+
+          {Array.isArray(list)&&(
+            <>
+              {/* Resumen + reporte */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:7}}>
+                {[
+                  {n:graves.length, l:'Graves', c:'var(--urgent)'},
+                  {n:abiertos.filter(h=>h.status==='pendiente').length, l:'Sin reclamar', c:'var(--urgent)'},
+                  {n:abiertos.filter(h=>h.status==='reclamado').length, l:'Reclamados', c:'var(--gold)'},
+                ].map((k,i)=>(
+                  <div key={i} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'9px 6px',textAlign:'center'}}>
+                    <div style={{fontSize:18,fontWeight:800,fontFamily:'var(--serif)',color:k.c,lineHeight:1}}>{k.n}</div>
+                    <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:4,fontWeight:700}}>{k.l}</div>
+                  </div>
+                ))}
+              </div>
+
+              {isAdmin&&(
+                <div style={{display:'flex',gap:7}}>
+                  <button onClick={()=>generarReporte(true)} disabled={repBusy}
+                    style={{flex:2,background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:10,
+                      padding:'11px',fontSize:12.5,fontWeight:800,cursor:repBusy?'default':'pointer'}}>
+                    {repBusy?'Preparando...':'📄 Reporte para la reunión'}
+                  </button>
+                  <button onClick={()=>generarReporte(false)} disabled={repBusy}
+                    style={{flex:1,background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)',
+                      borderRadius:10,padding:'11px',fontSize:11,fontWeight:700,cursor:repBusy?'default':'pointer'}}>
+                    Incluir resueltos
+                  </button>
+                </div>
+              )}
+
+              {/* Filtros */}
+              <div style={{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center'}}>
+                {[['abiertos','Abiertos'],['pendiente','Sin reclamar'],['reclamado','Reclamados'],['resuelto','Resueltos'],['todos','Todos']].map(([id,lbl])=>{
+                  const on = filtro===id;
+                  return (
+                    <button key={id} onClick={()=>setFiltro(id)}
+                      style={{padding:'5px 11px',borderRadius:8,fontSize:11,fontWeight:700,cursor:'pointer',
+                        border:`1.5px solid ${on?'var(--gold)':'var(--border)'}`,
+                        background:on?'rgba(201,150,58,.14)':'transparent',
+                        color:on?'var(--gold)':'var(--muted)'}}>{lbl}</button>
+                  );
+                })}
+                <select value={unidadF} onChange={e=>setUnidadF(e.target.value)}
+                  style={{marginLeft:'auto',background:'var(--surface)',border:'1px solid var(--border)',
+                    borderRadius:8,padding:'5px 8px',fontSize:11,color:'var(--muted)',outline:'none'}}>
+                  <option value="all">Todas las unidades</option>
+                  {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                </select>
+              </div>
+
+              {/* Listado por unidad */}
+              {list===null?<div className="spinner"/>:visibles.length===0?(
+                <div className="empty" style={{padding:'26px 0'}}>
+                  <div style={{fontSize:30,marginBottom:8}}>🔎</div>
+                  <div className="empty-t">Sin hallazgos</div>
+                  <div className="empty-s">Los problemas que registres van a aparecer acá.</div>
+                </div>
+              ):(
+                <div style={{display:'flex',flexDirection:'column',gap:14}}>
+                  {unidadesVis.map(uid=>{
+                    const items = porUnidad[uid].sort((a,b)=>(ordenSev[a.severity]??1)-(ordenSev[b.severity]??1));
+                    return (
+                      <div key={uid}>
+                        <div className="dash-section-title" style={{marginBottom:7}}>
+                          {uname(uid)} <span style={{color:'var(--muted)',fontWeight:400}}>· {items.length}</span>
+                        </div>
+                        <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                          {items.map(h=>{
+                            const sv = sevOf(h.severity), es = estOf(h.status);
+                            const meses = h.claimedAt ? mesesDesde(h.claimedAt) : null;
+                            return (
+                              <div key={h.id} style={{background:'var(--surface)',border:'1px solid var(--border)',
+                                borderLeft:`3px solid ${sv.color}`,borderRadius:11,padding:'10px 12px'}}>
+                                <div style={{display:'flex',alignItems:'flex-start',gap:9}}>
+                                  {(h.photos||[]).length>0&&(
+                                    <img src={h.photos[0]} alt="" loading="lazy" onClick={()=>setLightbox(h.photos[0])}
+                                      style={{width:48,height:48,borderRadius:8,objectFit:'cover',flexShrink:0,cursor:'zoom-in',border:'1px solid var(--border)'}}/>
+                                  )}
+                                  <div style={{flex:1,minWidth:0,cursor:'pointer'}}
+                                    onClick={()=>setForm({...h, detectedAt:h.detectedAt||hoy(), fotos:[]})}>
+                                    <div style={{fontSize:12.5,fontWeight:700,color:'var(--text)',lineHeight:1.3}}>
+                                      {h.title} <span style={{fontSize:10,color:'var(--muted)',fontWeight:400}}>✎</span>
+                                    </div>
+                                    {h.description&&<div style={{fontSize:10.5,color:'var(--muted)',marginTop:2,lineHeight:1.4,
+                                      overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{h.description}</div>}
+                                    <div style={{display:'flex',gap:6,alignItems:'center',marginTop:5,flexWrap:'wrap'}}>
+                                      <span style={{fontSize:8.5,fontWeight:800,color:sv.color,background:`${sv.color}1a`,
+                                        padding:'2px 7px',borderRadius:5,textTransform:'uppercase',letterSpacing:.3}}>{sv.label}</span>
+                                      <span style={{fontSize:9.5,color:'var(--muted)',textTransform:'capitalize'}}>{h.category||'otro'}</span>
+                                      <span style={{fontSize:9.5,color:'var(--muted)'}}>· {fmtD(h.detectedAt)}</span>
+                                      {(h.photos||[]).length>1&&<span style={{fontSize:9,color:'var(--muted)'}}>· {h.photos.length} fotos</span>}
+                                    </div>
+                                    {meses>=1&&h.status!=='resuelto'&&(
+                                      <div style={{fontSize:9.5,fontWeight:700,color:'var(--urgent)',marginTop:4}}>
+                                        ⚠ Reclamado hace {meses} {meses===1?'mes':'meses'} y sigue abierto
+                                      </div>
+                                    )}
+                                  </div>
+                                  <button onClick={()=>borrar(h)} title="Borrar"
+                                    style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:15,padding:'2px 4px',flexShrink:0}}>×</button>
+                                </div>
+                                <div style={{display:'flex',gap:4,marginTop:8}}>
+                                  {EST.map(e=>(
+                                    <button key={e.id} onClick={()=>cambiarEstado(h,e.id)} disabled={h.status===e.id}
+                                      style={{flex:1,fontSize:9.5,fontWeight:800,padding:'5px 4px',borderRadius:7,
+                                        cursor:h.status===e.id?'default':'pointer',
+                                        border:`1px solid ${h.status===e.id?e.color:'var(--border)'}`,
+                                        background:h.status===e.id?`${e.color}1a`:'transparent',
+                                        color:h.status===e.id?e.color:'var(--muted)'}}>
+                                      {h.status===e.id?'✓ ':''}{e.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {list!==false&&<button className="fab" onClick={nuevo}><Ic d={D.plus} sz={16}/> Hallazgo</button>}
+
+      {/* Alta / edición */}
+      {form&&(
+        <div className="overlay" onClick={e=>e.target===e.currentTarget&&!busy&&setForm(null)}>
+          <div className="modal">
+            <div className="mhandle"/>
+            <div className="mtitle">{form.id?'Editar hallazgo':'Nuevo hallazgo'}</div>
+
+            <div className="msec">
+              <span className="mlbl">Fotos {(form.fotos||[]).length>0&&<span style={{color:'var(--gold)'}}>· {form.fotos.length} nueva{form.fotos.length!==1?'s':''}</span>}</span>
+              {(form.photos||[]).length>0&&(
+                <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:5,marginBottom:6}}>
+                  {form.photos.map((src,i)=>(
+                    <img key={i} src={src} onClick={()=>setLightbox(src)}
+                      style={{width:'100%',aspectRatio:'1',objectFit:'cover',borderRadius:8,border:'1px solid var(--border)',cursor:'zoom-in',display:'block'}}/>
+                  ))}
+                </div>
+              )}
+              {(form.fotos||[]).length>0&&(
+                <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:5,marginBottom:6}}>
+                  {form.fotos.map((src,i)=>(
+                    <div key={i} style={{position:'relative'}}>
+                      <img src={src} style={{width:'100%',aspectRatio:'1',objectFit:'cover',borderRadius:8,border:'1.5px solid var(--gold)',display:'block'}}/>
+                      <button onClick={()=>setForm(p=>({...p,fotos:p.fotos.filter((_,k)=>k!==i)}))} disabled={busy}
+                        style={{position:'absolute',top:-4,right:-4,width:20,height:20,borderRadius:'50%',
+                          background:'rgba(184,50,50,.95)',border:'none',color:'#fff',fontSize:12,lineHeight:1,cursor:'pointer'}}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{display:'flex',gap:7}}>
+                <label style={{flex:2,display:'flex',alignItems:'center',justifyContent:'center',gap:7,padding:'11px 8px',
+                  borderRadius:10,border:'2px dashed var(--gold)',cursor:busy?'default':'pointer',background:'rgba(201,150,58,.07)',opacity:busy?.5:1}}>
+                  <span style={{fontSize:19,lineHeight:1}}>📷</span>
+                  <span style={{fontSize:12,fontWeight:800,color:'var(--gold)'}}>Tomar foto</span>
+                  <input type="file" accept="image/*" capture="environment" style={{display:'none'}} disabled={busy}
+                    onChange={e=>{ agregarFoto(e.target.files[0]); e.target.value=''; }}/>
+                </label>
+                <label style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:5,padding:'11px 8px',
+                  borderRadius:10,border:'2px dashed var(--border)',cursor:busy?'default':'pointer',background:'var(--bg)',opacity:busy?.5:1}}>
+                  <span style={{fontSize:16,lineHeight:1}}>🖼️</span>
+                  <span style={{fontSize:10.5,fontWeight:700,color:'var(--muted)'}}>Galería</span>
+                  <input type="file" accept="image/*" style={{display:'none'}} disabled={busy}
+                    onChange={e=>{ agregarFoto(e.target.files[0]); e.target.value=''; }}/>
+                </label>
+              </div>
+            </div>
+
+            <div className="msec"><span className="mlbl">Unidad</span>
+              <select className="minp msel" value={form.unitId} disabled={busy}
+                onChange={e=>setForm(p=>({...p,unitId:e.target.value}))}>
+                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+              </select></div>
+
+            <div className="msec"><span className="mlbl">Qué encontró</span>
+              <input className="minp" value={form.title} disabled={busy}
+                onChange={e=>setForm(p=>({...p,title:e.target.value}))}
+                placeholder="Ej: Filtro del A/C sucio, sábanas manchadas..."/></div>
+
+            <div className="msec"><span className="mlbl">Detalle (opcional)</span>
+              <input className="minp" value={form.description||''} disabled={busy}
+                onChange={e=>setForm(p=>({...p,description:e.target.value}))}
+                placeholder="Más contexto para la reunión"/></div>
+
+            <div className="msec"><span className="mlbl">Gravedad</span>
+              <div className="cgrid">
+                {SEV.map(sv=>(
+                  <button key={sv.id} onClick={()=>setForm(p=>({...p,severity:sv.id}))} disabled={busy}
+                    style={{padding:'9px 6px',borderRadius:9,cursor:'pointer',fontSize:12,fontWeight:800,
+                      border:`2px solid ${form.severity===sv.id?sv.color:'var(--border)'}`,
+                      background:form.severity===sv.id?`${sv.color}1f`:'var(--bg)',
+                      color:form.severity===sv.id?sv.color:'var(--muted)'}}>
+                    {form.severity===sv.id?'✓ ':''}{sv.label}
+                  </button>
+                ))}
+              </div></div>
+
+            <div className="msec"><span className="mlbl">Categoría</span>
+              <select className="minp msel" value={form.category} disabled={busy}
+                onChange={e=>setForm(p=>({...p,category:e.target.value}))}>
+                {CATS_F.map(c=><option key={c} value={c}>{c}</option>)}
+              </select></div>
+
+            <div className="msec"><span className="mlbl">Fecha en que lo detectó</span>
+              <input className="minp" type="date" value={form.detectedAt} disabled={busy}
+                onChange={e=>setForm(p=>({...p,detectedAt:e.target.value}))}/></div>
+
+            {err&&(
+              <div style={{background:'var(--urgent-bg)',border:'1px solid var(--urgent)',borderRadius:9,
+                padding:'9px 11px',fontSize:11,color:'var(--urgent)',fontWeight:600,marginBottom:8}}>{err}</div>
+            )}
+
+            <div className="macts">
+              <button className="mcancel" onClick={()=>setForm(null)} disabled={busy}>Cancelar</button>
+              <button className="msave" onClick={guardar} disabled={busy||!String(form.title).trim()}>
+                {busy?(paso||'Guardando...'):(form.id?'Guardar cambios':'Registrar')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {lightbox&&(
+        <div onClick={()=>setLightbox(null)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.93)',zIndex:200,
+          display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+          <img src={lightbox} style={{maxWidth:'100%',maxHeight:'90vh',borderRadius:12,objectFit:'contain'}}/>
+          <button onClick={()=>setLightbox(null)} style={{position:'absolute',top:16,right:16,background:'rgba(255,255,255,.1)',
+            border:'1px solid rgba(255,255,255,.15)',color:'#fff',width:36,height:36,borderRadius:50,fontSize:20,cursor:'pointer'}}>×</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* APP */
 function App() {
   const { user, loading } = useAuth();
@@ -7610,6 +8109,7 @@ function App() {
     {id:'records', label:'Registros'},
     {id:'reservations', label:'Reservas'},
     {id:'invoices', label:'Facturas'},
+    {id:'findings', label:'Bocobay'},
     ...(isAdmin?[{id:'users',label:'Usuarios'}]:[]),
   ];
 
@@ -7620,6 +8120,7 @@ function App() {
     records: <RecordsScreen/>,
     reservations: <ReservationsScreen/>,
     invoices: <InvoicesScreen/>,
+    findings: <FindingsScreen/>,
     users:   <UsersScreen/>,
   };
 
@@ -7637,6 +8138,7 @@ function App() {
             {t.id==='records' &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>}
             {t.id==='reservations'&&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>}
             {t.id==='invoices'&&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 2v20l2.5-1.5L9 22l2.5-1.5L14 22l2.5-1.5L19 22V2l-2.5 1.5L14 2l-2.5 1.5L9 2 6.5 3.5 4 2z"/><line x1="8" y1="8" x2="15" y2="8"/><line x1="8" y1="12" x2="15" y2="12"/></svg>}
+            {t.id==='findings'&&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="12"/><line x1="11" y1="14.5" x2="11" y2="14.51"/></svg>}
             {t.id==='users'   &&<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>}
             <span>{t.label}</span>
             <div className="nav-dot"/>
