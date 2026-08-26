@@ -2084,9 +2084,47 @@ function UnitsScreen() {
   const [showDone,  setShowDone]  = useState(false);
   const [showNew,   setShowNew]   = useState(false);
   const [uTab,      setUTab]      = useState('tasks'); // 'tasks' | 'photos' | 'availability'
+  // Accesos (PIN de puerta y wifi). El backend solo los devuelve a quien
+  // corresponde: si no hay permiso, responde 404 y la sección no se muestra.
+  const [accesos,   setAccesos]   = useState(null);   // null cargando · false sin permiso
+  const [accForm,   setAccForm]   = useState(null);
+  const [accBusy,   setAccBusy]   = useState(false);
+  const [verClaves, setVerClaves] = useState(false);
   const [lightbox,  setLightbox]  = useState(null);
 
   useEffect(()=>{ fetchTasks(); fetchMaintTemplates(); },[]);
+
+  useEffect(()=>{ (async()=>{
+    try {
+      const r = await authFetch('/unit-access');
+      if (r.status===404 || r.status===403) { setAccesos(false); return; }
+      setAccesos(r.ok ? await r.json() : []);
+    } catch { setAccesos(false); }
+  })(); },[authFetch]);
+
+  const accesoDe = uid => (Array.isArray(accesos)?accesos:[]).find(a=>a.unitId===uid) || null;
+
+  const guardarAcceso = async () => {
+    if (!accForm) return;
+    setAccBusy(true);
+    const r = await authFetch(`/unit-access/${accForm.unitId}`,{method:'PUT',body:JSON.stringify({
+      doorPin:  String(accForm.doorPin||''),
+      wifiName: String(accForm.wifiName||''),
+      wifiPass: String(accForm.wifiPass||''),
+      notes:    String(accForm.notes||''),
+    })});
+    setAccBusy(false);
+    if (r.ok) {
+      const upd = await r.json();
+      setAccesos(prev=>{
+        const base = Array.isArray(prev)?prev:[];
+        return base.some(a=>a.unitId===upd.unitId)
+          ? base.map(a=>a.unitId===upd.unitId?upd:a)
+          : [...base, upd];
+      });
+      setAccForm(null);
+    } else alert('No se pudieron guardar los accesos.');
+  };
   const reloadTasks = useCallback(()=>{ fetchTasks(true); },[fetchTasks]);
 
   const getAlert = uid => {
@@ -2802,6 +2840,50 @@ function UnitsScreen() {
                 </button>
               </div>
             </div>
+            {/* Accesos: siempre a la vista, es el dato que se busca en el momento */}
+            {accesos!==false&&(()=>{
+              const a = accesoDe(selU);
+              const copiar = (txt,lbl) => {
+                if (!txt) return;
+                try { navigator.clipboard.writeText(txt); } catch(e) {}
+              };
+              const campo = (lbl, val, secreto) => (
+                <div onClick={()=>copiar(val)} title={val?'Tocar para copiar':''}
+                  style={{flex:1,minWidth:96,background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.1)',
+                    borderRadius:9,padding:'6px 10px',cursor:val?'pointer':'default'}}>
+                  <div style={{fontSize:8,color:'rgba(255,255,255,.4)',textTransform:'uppercase',letterSpacing:.6,fontWeight:700}}>{lbl}</div>
+                  <div style={{fontSize:13,fontWeight:700,color:val?'var(--gold2)':'rgba(255,255,255,.25)',
+                    fontFamily:'monospace',letterSpacing:.5,marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {!val ? '—' : (secreto && !verClaves) ? '••••••' : val}
+                  </div>
+                </div>
+              );
+              return (
+                <div style={{display:'flex',gap:6,alignItems:'stretch',marginBottom:8,flexWrap:'wrap'}}>
+                  {campo('PIN puerta', a?.doorPin, true)}
+                  {campo('Red wifi', a?.wifiName, false)}
+                  {campo('Clave wifi', a?.wifiPass, true)}
+                  <div style={{display:'flex',gap:5,alignItems:'center'}}>
+                    <button onClick={()=>setVerClaves(v=>!v)} title={verClaves?'Ocultar':'Mostrar'}
+                      style={{background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.1)',
+                        borderRadius:9,color:'rgba(255,255,255,.6)',padding:'7px 10px',fontSize:14,cursor:'pointer'}}>
+                      {verClaves?'🙈':'👁'}
+                    </button>
+                    <button onClick={()=>setAccForm({unitId:selU, doorPin:a?.doorPin||'', wifiName:a?.wifiName||'',
+                      wifiPass:a?.wifiPass||'', notes:a?.notes||''})}
+                      title="Editar accesos"
+                      style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',
+                        borderRadius:9,color:'var(--gold)',padding:'7px 10px',fontSize:12,fontWeight:800,cursor:'pointer'}}>
+                      ✎
+                    </button>
+                  </div>
+                  {a?.notes&&(
+                    <div style={{width:'100%',fontSize:10,color:'rgba(255,255,255,.45)',marginTop:1}}>{a.notes}</div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Category pills */}
             {Object.keys(catCounts).length>0&&(
               <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
@@ -3462,6 +3544,49 @@ function UnitsScreen() {
           <button onClick={()=>setLightbox(null)} style={{position:'absolute',top:16,right:16,background:'rgba(255,255,255,.1)',border:'1px solid rgba(255,255,255,.15)',color:'#fff',width:36,height:36,borderRadius:50,fontSize:20,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
         </div>
       )}
+      {accForm&&(
+        <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&!accBusy&&setAccForm(null)}>
+          <div style={{background:'var(--surface)',borderRadius:14,padding:'18px 16px',maxWidth:360,width:'93%'}}>
+            <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:3}}>Accesos · {uname(accForm.unitId)}</div>
+            <div style={{fontSize:10,color:'var(--muted)',marginBottom:13,lineHeight:1.4}}>
+              Visible solo para vos y Ricardo.
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:9}}>
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>PIN de la puerta</div>
+                <input className="minp" value={accForm.doorPin} disabled={accBusy} inputMode="numeric"
+                  style={{fontFamily:'monospace',fontSize:16,letterSpacing:1}}
+                  onChange={e=>setAccForm(p=>({...p,doorPin:e.target.value}))} placeholder="Ej: 4821"/>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Nombre de la red wifi</div>
+                <input className="minp" value={accForm.wifiName} disabled={accBusy} autoCapitalize="none"
+                  onChange={e=>setAccForm(p=>({...p,wifiName:e.target.value}))} placeholder="Ej: PortaAlSole_1"/>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Clave del wifi</div>
+                <input className="minp" value={accForm.wifiPass} disabled={accBusy} autoCapitalize="none"
+                  style={{fontFamily:'monospace',fontSize:15}}
+                  onChange={e=>setAccForm(p=>({...p,wifiPass:e.target.value}))} placeholder="Contraseña"/>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Notas (opcional)</div>
+                <input className="minp" value={accForm.notes} disabled={accBusy}
+                  onChange={e=>setAccForm(p=>({...p,notes:e.target.value}))} placeholder="Ej: la llave de repuesto está en recepción"/>
+              </div>
+              <div style={{display:'flex',gap:8,marginTop:4}}>
+                <button onClick={()=>setAccForm(null)} disabled={accBusy}
+                  style={{flex:1,background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',borderRadius:9,padding:'11px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Cancelar</button>
+                <button onClick={guardarAcceso} disabled={accBusy}
+                  style={{flex:2,background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:9,padding:'11px',fontWeight:800,fontSize:13,cursor:'pointer'}}>
+                  {accBusy?'Guardando...':'Guardar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showNew&&<NewTaskModal onClose={()=>setShowNew(false)} onSaved={()=>{setShowNew(false);reloadTasks();}} defaultUnitId={selU==='ALL'?undefined:selU}/>}
       {editT&&<TaskDetailModal task={editT} onClose={()=>setEditT(null)} onUpdated={()=>{setEditT(null);reloadTasks();}}/>}
     </div>
