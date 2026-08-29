@@ -503,6 +503,9 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
         hostawayId,
         reservationId,
         isOwner,
+        // Un listado como portaalsole2-3-4 genera la misma reserva en varias
+        // unidades: ahí el número por sí solo no identifica una fila.
+        multiUnit: unitIds.length > 1,
       });
     });
   }
@@ -524,10 +527,42 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
 // lugar de duplicarse. Las reservas guardadas antes de que existiera ese
 // campo caen en la clave de respaldo (unidad + fechas).
 const resNum   = r => String(r.reservationId || '').trim();
-const resKey   = r => resNum(r) ? `R${resNum(r)}_${r.unitId}` : null;
 const resKeyFb = r => `F${r.unitId}_${r.checkIn.getTime()}_${r.checkOut.getTime()}`;
 
+// Una reserva puede cambiar de unidad en Hostaway. Si la unidad formara parte
+// de la clave, la versión vieja quedaría huérfana y la unidad anterior se
+// vería ocupada para siempre. Por eso la clave es solo el número...
+// ...salvo en los listados multi-unidad (portaalsole2-3-4), donde la misma
+// reserva existe legítimamente en varias unidades a la vez.
+const numsMultiUnidad = (nuevas, existentes) => {
+  const multi = new Set();
+  (nuevas||[]).forEach(r=>{ if (r.multiUnit && resNum(r)) multi.add(resNum(r)); });
+
+  // Reservas multi-unidad guardadas antes de que existiera la marca: se
+  // reconocen porque el mismo número aparece con varias unidades. Solo se
+  // consideran si no vinieron en el archivo nuevo, que es la fuente confiable.
+  const enNuevas = new Set((nuevas||[]).map(resNum).filter(Boolean));
+  const porNum = new Map();
+  (existentes||[]).forEach(r=>{
+    const n = resNum(r);
+    if (!n || enNuevas.has(n)) return;
+    if (!porNum.has(n)) porNum.set(n, new Set());
+    porNum.get(n).add(r.unitId);
+  });
+  porNum.forEach((unidades, n)=>{ if (unidades.size > 1) multi.add(n); });
+  return multi;
+};
+
+const resKeyCon = (multi) => (r) => {
+  const n = resNum(r);
+  if (!n) return null;
+  return multi.has(n) ? `R${n}_${r.unitId}` : `R${n}`;
+};
+
 function mergeReservations(existentes, nuevas, canceladasNuevas = []) {
+  const multi  = numsMultiUnidad([...(nuevas||[]), ...(canceladasNuevas||[])], existentes);
+  const resKey = resKeyCon(multi);
+  let movidas = 0; // reservas que cambiaron de unidad
   const porClave = new Map(); // clave definitiva → reserva
   // Solo indexa entradas SIN número de reserva. Las que ya lo tienen no se
   // buscan nunca por fechas: dos reservas distintas pueden compartir unidad y
@@ -553,7 +588,8 @@ function mergeReservations(existentes, nuevas, canceladasNuevas = []) {
     if (esNueva) {
       const previo = porClave.get(k);
       if (previo) {
-        if (previo.income === r.income && previo.guest === r.guest) sinCambio++;
+        if (previo.unitId !== r.unitId) { movidas++; actualizadas++; }
+        else if (previo.income === r.income && previo.guest === r.guest) sinCambio++;
         else actualizadas++;
       } else nuevas_++;
     }
@@ -587,7 +623,7 @@ function mergeReservations(existentes, nuevas, canceladasNuevas = []) {
   return {
     lista: [...porClave.values()],
     retiradas,
-    stats: { nuevas: nuevas_, actualizadas, sinCambio, canceladas },
+    stats: { nuevas: nuevas_, actualizadas, sinCambio, canceladas, movidas },
   };
 }
 
@@ -645,6 +681,8 @@ function detectarAnomalias({ existentes, resCsv, cancCsv, listaFinal, retiradas 
         tipo: 'No vino en este archivo',
         detalle: `${desc(r)}${money(r) ? ` · ${'$'+money(r).toLocaleString('en-US')}` : ''}`,
         nota: 'Se conserva. Puede haber quedado fuera del filtro de exportación.',
+        // La reserva completa, para poder ofrecer quitarla desde el resumen
+        ausente: r,
       });
     });
   }
@@ -5278,6 +5316,13 @@ function ReservationsScreen() {
   const [incMonth, setIncMonth] = useState(null); // null = año completo
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null); // {stats, ok, error}
+  const [retirar, setRetirar] = useState([]);   // ids de reservas ausentes a quitar
+  const [retBusy, setRetBusy] = useState(false);
+  // Reservas que estaban guardadas y no vinieron en el CSV: se marcan para
+  // quitarlas. No se borran solas porque "ausente" también puede significar
+  // que el archivo venía recortado.
+  const [quitarSel, setQuitarSel] = useState({});
+  const [quitarBusy, setQuitarBusy] = useState(false);
   const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101);
   const MONTHS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
   const MONTHS_FULL = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -5363,17 +5408,42 @@ function ReservationsScreen() {
           <div style={{fontFamily:'var(--serif)',fontSize:22,fontWeight:700,color:'#fff'}}>Reservas</div>
           <label style={{display:'flex',alignItems:'center',gap:5,background:'rgba(201,150,58,.15)',color:'var(--gold)',border:'1px solid rgba(201,150,58,.3)',borderRadius:8,padding:'6px 10px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>
             &#8635; {reservations.length>0?'Actualizar CSV':'Subir CSV'}
-            <input type="file" accept=".csv" style={{display:'none'}} onChange={e=>{
-              const file=e.target.files[0]; if(!file) return;
-              const rd=new FileReader();
-              rd.onload=async ev=>{
-                const text=ev.target.result;
+            {/* multiple: Hostaway corta la exportación en 1000 filas, así que el
+                histórico sale en varios archivos. Se procesan juntos: si se
+                subieran de a uno, cada archivo marcaría como ausentes las
+                reservas de los otros. */}
+            <input type="file" accept=".csv" multiple style={{display:'none'}} onChange={e=>{
+              const files=[...e.target.files]; if(!files.length) return;
+              const leer = f => new Promise(res=>{ const rd=new FileReader();
+                rd.onload=ev=>res(String(ev.target.result||'')); rd.onerror=()=>res(''); rd.readAsText(f); });
+              (async () => {
+                const textos = (await Promise.all(files.map(leer))).filter(Boolean);
                 setImporting(true);
                 setImportResult(null);
                 try {
-                  const stats = parseHostawayWithStats(text);
-                  const resCsv  = parseHostawayCSV(text);
-                  const cancCsv = parseHostawayCancellationsCSV(text);
+                  // Estadísticas sumadas de todos los archivos
+                  const stats = textos.map(parseHostawayWithStats).reduce((a,b)=>({
+                    totalRows:a.totalRows+b.totalRows, confirmed:a.confirmed+b.confirmed,
+                    cancelled:a.cancelled+b.cancelled, ownerBlocks:a.ownerBlocks+b.ownerBlocks,
+                    skippedOther:a.skippedOther+b.skippedOther,
+                    skippedUnknownUnit:a.skippedUnknownUnit+b.skippedUnknownUnit,
+                    skippedBadDate:a.skippedBadDate+b.skippedBadDate,
+                    unknownUnits:[...new Set([...a.unknownUnits,...b.unknownUnits])],
+                  }));
+
+                  // Unir todos los archivos antes de comparar contra la base
+                  const dedup = lista => {
+                    const vistos = new Set();
+                    return lista.filter(r=>{
+                      const k = resNum(r) ? `R${resNum(r)}_${r.unitId}`
+                                          : `F${r.unitId}_${r.checkIn.getTime()}_${r.checkOut.getTime()}`;
+                      if (vistos.has(k)) return false;
+                      vistos.add(k); return true;
+                    });
+                  };
+                  const resCsv  = dedup(textos.flatMap(parseHostawayCSV));
+                  const cancCsv = dedup(textos.flatMap(parseHostawayCancellationsCSV));
+                  const nArchivos = textos.length;
 
                   // Hostaway exporta máximo 1000 filas: se acumula en vez de
                   // reemplazar, para poder reconstruir el histórico completo.
@@ -5481,18 +5551,18 @@ function ReservationsScreen() {
                     localStorage.setItem('pas_income_snapshot', JSON.stringify({
                       year: thisYr, total: newTotal, byUnit: newByUnit, resByUnit: newResByUnit, date: new Date().toLocaleDateString('es-VE')
                     }));
-                    setImportResult({ ok:true, stats, mergeStats, anomalias, csvCount:resCsv.length,
+                    setImportResult({ ok:true, stats, mergeStats, anomalias, nArchivos, csvCount:resCsv.length,
                                       imported:res.length, importedCanc:canc.length, snapshotDiff, unitChanges, newTotal });
                   } else {
                     setImportResult({ ok:false, error:(r1.error||r2.error||'Error desconocido') });
                   }
                 } catch(err) {
-                  setImportResult({ ok:false, error:'El archivo no se pudo leer. ¿Es un CSV de Hostaway?' });
+                  setImportResult({ ok:false, error:'No se pudieron leer los archivos. ¿Son CSV de Hostaway?' });
                 }
+                setQuitarSel({});
                 setImporting(false);
-                e.target.value=''; // permitir resubir el mismo archivo
-              };
-              rd.readAsText(file);
+                e.target.value=''; // permitir resubir los mismos archivos
+              })();
             }}/>
           </label>
         </div>
@@ -6810,6 +6880,67 @@ function ReservationsScreen() {
                 <div style={{fontSize:34,textAlign:'center',marginBottom:6}}>✅</div>
                 <div style={{fontSize:17,fontWeight:700,fontFamily:'var(--serif)',textAlign:'center',marginBottom:14}}>Importación completa</div>
 
+                {/* Reservas que ya no vienen: la app no puede saber si se
+                    cancelaron o si quedaron fuera de la exportación, así que
+                    las muestra y deja que vos decidas. */}
+                {(()=>{
+                  const aus = (importResult.anomalias?.lista||[]).filter(a=>a.ausente);
+                  if (aus.length===0) return null;
+                  const clave = r => String(r.reservationId||'') || `${r.unitId}_${r.checkIn.getTime()}`;
+                  const marcada = r => retirar.includes(clave(r));
+                  const toggle = r => setRetirar(prev=>{
+                    const k = clave(r);
+                    return prev.includes(k) ? prev.filter(x=>x!==k) : [...prev, k];
+                  });
+                  const quitar = async () => {
+                    if (retirar.length===0) return;
+                    setRetBusy(true);
+                    const quedan = reservations.filter(r=>!retirar.includes(clave(r)));
+                    const res = await saveReservations(quedan);
+                    setRetBusy(false);
+                    if (res.ok) {
+                      setReservations(quedan);
+                      setRetirar([]);
+                      setImportResult(p=>({...p, anomalias:{
+                        ...p.anomalias,
+                        lista: p.anomalias.lista.filter(a=>!a.ausente || !retirar.includes(clave(a.ausente))),
+                        total: p.anomalias.total - retirar.length,
+                      }}));
+                    } else alert('No se pudieron quitar: ' + (res.error||''));
+                  };
+                  return (
+                    <div style={{background:'rgba(201,150,58,.07)',border:'1px solid rgba(201,150,58,.28)',
+                      borderRadius:11,padding:'11px 12px',marginBottom:12}}>
+                      <div style={{fontSize:11,fontWeight:800,color:'var(--gold)',marginBottom:3}}>
+                        {aus.length} reserva{aus.length!==1?'s':''} que ya no viene{aus.length!==1?'n':''}
+                      </div>
+                      <div style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.45,marginBottom:8}}>
+                        Marcá las que sepas que se cancelaron. Las que dejes sin marcar se conservan.
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:4,maxHeight:180,overflowY:'auto'}} className="hide-scroll">
+                        {aus.map((a,i)=>(
+                          <label key={i} style={{display:'flex',gap:8,alignItems:'flex-start',cursor:'pointer',
+                            background:marcada(a.ausente)?'rgba(184,50,50,.08)':'var(--bg)',
+                            border:`1px solid ${marcada(a.ausente)?'rgba(184,50,50,.3)':'var(--border)'}`,
+                            borderRadius:8,padding:'6px 9px'}}>
+                            <input type="checkbox" checked={marcada(a.ausente)} disabled={retBusy}
+                              onChange={()=>toggle(a.ausente)}
+                              style={{accentColor:'#b83232',marginTop:2,flexShrink:0}}/>
+                            <span style={{fontSize:10.5,color:'var(--text)',lineHeight:1.4}}>{a.detalle}</span>
+                          </label>
+                        ))}
+                      </div>
+                      {retirar.length>0&&(
+                        <button onClick={quitar} disabled={retBusy}
+                          style={{width:'100%',marginTop:8,background:'var(--urgent)',color:'#fff',border:'none',
+                            borderRadius:9,padding:'10px',fontSize:12,fontWeight:800,cursor:retBusy?'default':'pointer'}}>
+                          {retBusy?'Quitando...':`Quitar ${retirar.length} reserva${retirar.length!==1?'s':''}`}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Anomalías: los fallos de importación son silenciosos */}
                 {importResult.anomalias&&importResult.anomalias.total>0&&(()=>{
                   const A = importResult.anomalias;
@@ -6817,7 +6948,8 @@ function ReservationsScreen() {
                   const bg  = n => n==='grave' ? 'rgba(184,50,50,.08)' : 'rgba(201,150,58,.07)';
                   const bd  = n => n==='grave' ? 'rgba(184,50,50,.28)' : 'rgba(201,150,58,.25)';
                   const orden = { grave:0, aviso:1 };
-                  const lista = [...A.lista].sort((a,b)=>orden[a.nivel]-orden[b.nivel]);
+                  const lista = A.lista.filter(a=>!a.ausente).sort((a,b)=>orden[a.nivel]-orden[b.nivel]);
+                  if (lista.length===0) return null;
                   return (
                     <div style={{marginBottom:12}}>
                       <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,fontWeight:700,marginBottom:7}}>
@@ -6849,11 +6981,12 @@ function ReservationsScreen() {
                 {importResult.mergeStats&&(
                   <div style={{background:'var(--bg)',borderRadius:10,padding:'11px 13px',marginBottom:12}}>
                     <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,fontWeight:700,marginBottom:7}}>
-                      {importResult.csvCount} reservas en el archivo
+                      {importResult.csvCount} reservas en {importResult.nArchivos>1?`${importResult.nArchivos} archivos`:'el archivo'}
                     </div>
                     {[
                       ['Nuevas',        importResult.mergeStats.nuevas,       'var(--done)'],
                       ['Actualizadas',  importResult.mergeStats.actualizadas, 'var(--gold)'],
+                      ['Cambiaron de unidad', importResult.mergeStats.movidas||0, 'var(--gold)'],
                       ['Ya estaban',    importResult.mergeStats.sinCambio,    'var(--muted)'],
                       ['Canceladas y retiradas', importResult.mergeStats.canceladas, 'var(--urgent)'],
                     ].filter(([,n])=>n>0).map(([lbl,n,col])=>(
