@@ -410,6 +410,10 @@ const HOSTAWAY_MAP = {
   'portaalsole-sub20':[20],
 };
 
+// Una estadia real nunca llega a 60 dias; los bloqueos de onboarding de
+// Bocobay duran meses o anios. El corte los separa sin ambiguedad.
+const MAX_NOCHES_BLOQUEO = 60;
+
 // Parse Hostaway CSV - confirmed reservations only
 function parseHostawayCSV(csvText) {
   return parseHostawayCSVWithStatus(csvText, 'confirmed');
@@ -430,7 +434,7 @@ function parseHostawayWithStats(csvText) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
     if (!row.status) continue;
     stats.totalRows++;
-    if (row.type === 'owner') stats.ownerBlocks++;
+    if (row.type === 'owner' || row.type === 'bocobay') stats.ownerBlocks++;
     else if (row.type !== 'guest') { stats.skippedOther++; continue; }
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     if (!HOSTAWAY_MAP[hostawayId]) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
@@ -459,12 +463,15 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     headers.forEach((h,j) => row[h.trim()] = (vals[j]||'').replace(/^"|"$/g,'').trim());
 
     if (row.status !== filterStatus) continue;
-    // Los bloqueos de propietario (owner) entran marcados: ocupan la unidad
-    // -importa para consumo de agua y verificaciones- pero no generan ingresos.
-    // Los de la administradora (bocobay) se descartan: incluyen bloqueos muy
-    // largos de onboarding que no reflejan ocupacion real.
-    if (row.type !== 'guest' && row.type !== 'owner') continue;
-    const isOwner = row.type === 'owner';
+    // Tipos sin ingreso que SI ocupan la unidad (importa para el consumo de
+    // agua y las verificaciones): bloqueos del propietario y reservas que
+    // Bocobay carga a su nombre.
+    //
+    // Las filas 'bocobay' son de dos clases distintas: reservas reales de
+    // pocos dias y bloqueos administrativos de meses o anios (onboarding,
+    // "moved to..."). Se separan por duracion: nada real llega a 60 dias.
+    if (row.type !== 'guest' && row.type !== 'owner' && row.type !== 'bocobay') continue;
+    const isOwner = row.type === 'owner' || row.type === 'bocobay';
 
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
     // display_id trae "aw-portaalsole10 | 30492867": la segunda parte es el
@@ -486,6 +493,12 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     const checkIn  = parseDate(dateParts[0].trim());
     const checkOut = parseDate(dateParts[1].trim());
     if (!checkIn || !checkOut) continue;
+
+    // Bloqueo administrativo de Bocobay, no ocupacion real
+    if (row.type === 'bocobay') {
+      const noches = Math.round((checkOut - checkIn) / 86400000);
+      if (noches > MAX_NOCHES_BLOQUEO) continue;
+    }
 
     const rawIncome = row.Income||'';
     const incomeNum = parseFloat(String(rawIncome).replace(/[^0-9.-]/g,''));
