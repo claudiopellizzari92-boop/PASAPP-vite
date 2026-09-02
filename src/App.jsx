@@ -1587,21 +1587,35 @@ function TasksScreen({ isDark, onThemeToggle }) {
 
   // Las verificaciones de entrada/salida caducan: pasada la fecha, el huésped
   // ya se fue y la tarea solo hace ruido en la lista.
-  const DIAS_GRACIA = 3;
+  // Si una unidad acumula varias verificaciones del mismo tipo sin hacer, solo
+  // la última tiene sentido: es el estado real en el que está la unidad ahora.
+  // Las anteriores nunca se van a completar y solo hacen ruido en la lista.
   const esVerif = t => /^Verificación (entrada|salida|cambio) · /.test(t.title||'');
-  const verifVencidas = tasks.filter(t=>{
-    if (t.status==='completado' || !esVerif(t) || !t.dueDate) return false;
-    const d = new Date(String(t.dueDate).slice(0,10)+'T12:00:00').getTime();
-    if (!isFinite(d)) return false;
-    return (Date.now() - d)/86400000 > DIAS_GRACIA;
-  });
+  const verifSobrantes = (()=>{
+    const grupos = {};
+    tasks.filter(t=>t.status!=='completado' && esVerif(t)).forEach(t=>{
+      const tipo = (t.title.match(/^Verificación (\w+)/)||[])[1] || '';
+      const k = `${t.unitId}_${tipo}`;
+      (grupos[k] = grupos[k] || []).push(t);
+    });
+    const fecha = t => {
+      const d = new Date(String(t.dueDate||t.createdAt||'').slice(0,10)+'T12:00:00').getTime();
+      return isFinite(d) ? d : 0;
+    };
+    // De cada grupo se conserva la más reciente; el resto sobra.
+    return Object.values(grupos).flatMap(g=>{
+      if (g.length<2) return [];
+      const orden = [...g].sort((a,b)=> fecha(b)-fecha(a) || b.id-a.id);
+      return orden.slice(1);
+    });
+  })();
 
   const limpiarVerificaciones = async () => {
-    const n = verifVencidas.length;
+    const n = verifSobrantes.length;
     if (n===0) return;
-    if (!confirm(`Se van a borrar ${n} verificación(es) vencida(s) hace más de ${DIAS_GRACIA} días.\n\nSon tareas de entrada/salida cuya fecha ya pasó: el huésped se fue y la unidad se limpió. ¿Continuar?`)) return;
+    if (!confirm(`Se van a borrar ${n} verificación(es) repetida(s).\n\nCuando una unidad tiene varias verificaciones del mismo tipo sin hacer, se conserva solo la más reciente. ¿Continuar?`)) return;
     let hechas = 0;
-    for (const t of verifVencidas) {
+    for (const t of verifSobrantes) {
       setLimpBusy(`Borrando ${++hechas} de ${n}...`);
       await authFetch(`/tasks/${t.id}`,{method:'DELETE'});
     }
@@ -1826,16 +1840,16 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
           </div>}
         </div>
 
-        {verifVencidas.length>0&&(
+        {verifSobrantes.length>0&&(
           <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(201,150,58,.08)',
             border:'1px solid rgba(201,150,58,.3)',borderRadius:11,padding:'10px 12px',margin:'0 0 10px'}}>
             <span style={{fontSize:19,flexShrink:0}}>🧹</span>
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:12,fontWeight:700,color:'var(--gold)'}}>
-                {verifVencidas.length} verificación{verifVencidas.length!==1?'es':''} con la fecha pasada
+                {verifSobrantes.length} verificación{verifSobrantes.length!==1?'es':''} repetida{verifSobrantes.length!==1?'s':''}
               </div>
               <div style={{fontSize:10,color:'var(--muted)',marginTop:1,lineHeight:1.4}}>
-                Entradas y salidas que ya ocurrieron. Se pueden borrar sin perder nada.
+                Unidades con varias del mismo tipo sin hacer. Se conserva la más reciente de cada una.
               </div>
             </div>
             <button onClick={limpiarVerificaciones} disabled={!!limpBusy}
@@ -5216,12 +5230,15 @@ function DashboardScreen({ onNavigate }) {
           // fue y la unidad se limpió varias veces. Al crear la nueva se retira
           // la anterior de la misma unidad, así no se acumulan.
           const esVerificacion = t => /^Verificación (entrada|salida|cambio) · /.test(t.title||'');
-          const limpiarPrevias = async (unitId, exceptoIso) => {
+          const tipoDe = t => (String(t.title||'').match(/^Verificación (\w+)/)||[])[1] || '';
+          const limpiarPrevias = async (unitId, tipo) => {
+            // Cualquier verificación previa del mismo tipo en esa unidad, tenga
+            // la fecha que tenga: la nueva la reemplaza.
             const viejas = tasks.filter(t =>
               t.unitId === Number(unitId) &&
               t.status !== 'completado' &&
               esVerificacion(t) &&
-              String(t.dueDate||'').slice(0,10) !== exceptoIso
+              tipoDe(t) === tipo
             );
             for (const t of viejas) {
               await authFetch(`/tasks/${t.id}`, { method:'DELETE' });
@@ -5240,7 +5257,7 @@ function DashboardScreen({ onNavigate }) {
               type:'preventivo', status:'pendiente', assignee:'Ricardo',
               dueDate: iso(ev.date),
             };
-            await limpiarPrevias(ev.unitId, iso(ev.date));
+            await limpiarPrevias(ev.unitId, ev.tipo);
             const r = await authFetch('/tasks',{method:'POST',body:JSON.stringify(payload)});
             return r.ok;
           };
