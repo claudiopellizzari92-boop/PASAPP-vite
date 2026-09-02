@@ -701,8 +701,11 @@ function detectarAnomalias({ existentes, resCsv, cancCsv, listaFinal, retiradas 
   }
 
   // 4) Solapamientos en la lista final -----------------------------------
+  // Solo huésped contra huésped: los bloqueos (propietario y Bocobay) se cargan
+  // a ojo y es normal que pisen el día de salida de un huésped o que estén
+  // duplicados. Marcarlos genera ruido y esconde las sobreventas reales.
   const porUnidad = {};
-  listaFinal.forEach(r => { (porUnidad[r.unitId] = porUnidad[r.unitId] || []).push(r); });
+  listaFinal.filter(r => !r.isOwner).forEach(r => { (porUnidad[r.unitId] = porUnidad[r.unitId] || []).push(r); });
   Object.values(porUnidad).forEach(lista => {
     lista.sort((a,b) => a.checkIn - b.checkIn);
     for (let i = 1; i < lista.length; i++) {
@@ -712,7 +715,7 @@ function detectarAnomalias({ existentes, resCsv, cancCsv, listaFinal, retiradas 
           nivel: 'grave',
           tipo: 'Dos reservas a la vez',
           detalle: `${uname(a.unitId)} · ${a.guest||'?'} (${fecha(a.checkIn)}→${fecha(a.checkOut)}) y ${b.guest||'?'} (${fecha(b.checkIn)}→${fecha(b.checkOut)})`,
-          nota: 'Revisar el listado en Hostaway: puede estar mal mapeado.',
+          nota: 'Dos huéspedes en la misma noche. Revisar las fechas en Hostaway.',
         });
       }
     }
