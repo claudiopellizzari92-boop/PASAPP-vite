@@ -1542,6 +1542,7 @@ function TasksScreen({ isDark, onThemeToggle }) {
   const [sel,      setSel]      = useState(null);
   const [assigneeF,setAssigneeF]= useState('all');
   const [showStats, setShowStats] = useState(false);
+  const [limpBusy, setLimpBusy] = useState('');
 
   useEffect(() => { fetchTasks(); }, []);
 
@@ -1582,6 +1583,30 @@ function TasksScreen({ isDark, onThemeToggle }) {
     if (!confirm('Eliminar tarea?')) return;
     setTasks(prev=>(prev||[]).filter(t=>t.id!==task.id));
     authFetch(`/tasks/${task.id}`,{method:'DELETE'});
+  };
+
+  // Las verificaciones de entrada/salida caducan: pasada la fecha, el huésped
+  // ya se fue y la tarea solo hace ruido en la lista.
+  const DIAS_GRACIA = 3;
+  const esVerif = t => /^Verificación (entrada|salida|cambio) · /.test(t.title||'');
+  const verifVencidas = tasks.filter(t=>{
+    if (t.status==='completado' || !esVerif(t) || !t.dueDate) return false;
+    const d = new Date(String(t.dueDate).slice(0,10)+'T12:00:00').getTime();
+    if (!isFinite(d)) return false;
+    return (Date.now() - d)/86400000 > DIAS_GRACIA;
+  });
+
+  const limpiarVerificaciones = async () => {
+    const n = verifVencidas.length;
+    if (n===0) return;
+    if (!confirm(`Se van a borrar ${n} verificación(es) vencida(s) hace más de ${DIAS_GRACIA} días.\n\nSon tareas de entrada/salida cuya fecha ya pasó: el huésped se fue y la unidad se limpió. ¿Continuar?`)) return;
+    let hechas = 0;
+    for (const t of verifVencidas) {
+      setLimpBusy(`Borrando ${++hechas} de ${n}...`);
+      await authFetch(`/tasks/${t.id}`,{method:'DELETE'});
+    }
+    setLimpBusy('');
+    reloadTasks();
   };
 
   const exportCSV = () => {
@@ -1800,6 +1825,26 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
             </select>
           </div>}
         </div>
+
+        {verifVencidas.length>0&&(
+          <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(201,150,58,.08)',
+            border:'1px solid rgba(201,150,58,.3)',borderRadius:11,padding:'10px 12px',margin:'0 0 10px'}}>
+            <span style={{fontSize:19,flexShrink:0}}>🧹</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--gold)'}}>
+                {verifVencidas.length} verificación{verifVencidas.length!==1?'es':''} con la fecha pasada
+              </div>
+              <div style={{fontSize:10,color:'var(--muted)',marginTop:1,lineHeight:1.4}}>
+                Entradas y salidas que ya ocurrieron. Se pueden borrar sin perder nada.
+              </div>
+            </div>
+            <button onClick={limpiarVerificaciones} disabled={!!limpBusy}
+              style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,
+                padding:'7px 12px',fontSize:11,fontWeight:800,cursor:limpBusy?'default':'pointer',flexShrink:0}}>
+              {limpBusy || 'Limpiar'}
+            </button>
+          </div>
+        )}
 
         <div className="rcount">{filtered.length} tarea{filtered.length!==1?'s':''} activa{filtered.length!==1?'s':''}</div>
 
@@ -5167,6 +5212,23 @@ function DashboardScreen({ onNavigate }) {
           const CHECK_SALIDA  = 'Inspeccionar la unidad tras la salida del huésped:\n☐ Daños o faltantes causados por el huésped\n☐ Objetos olvidados\n☐ Estado de electrodomésticos y A/C\n☐ Novedades para reportar a la compañía de rentas\n\nRegistrar con fotos si hay algo anormal.';
           const CHECK_CAMBIO  = 'Cambio de huésped (salida + entrada el mismo día). Verificar tras la limpieza:\n\nSALIDA:\n☐ Daños o faltantes causados por el huésped\n☐ Objetos olvidados\n\nENTRADA:\n☐ Limpieza general y baños impecables\n☐ Sábanas y toallas completas\n☐ A/C y agua caliente funcionando\n☐ Electrodomésticos e inventario completos\n☐ Sin daños visibles ni olores\n\nSi algo falla: foto + reportar a la compañía de rentas.';
 
+          // Una verificación pendiente de hace días ya no sirve: el huésped se
+          // fue y la unidad se limpió varias veces. Al crear la nueva se retira
+          // la anterior de la misma unidad, así no se acumulan.
+          const esVerificacion = t => /^Verificación (entrada|salida|cambio) · /.test(t.title||'');
+          const limpiarPrevias = async (unitId, exceptoIso) => {
+            const viejas = tasks.filter(t =>
+              t.unitId === Number(unitId) &&
+              t.status !== 'completado' &&
+              esVerificacion(t) &&
+              String(t.dueDate||'').slice(0,10) !== exceptoIso
+            );
+            for (const t of viejas) {
+              await authFetch(`/tasks/${t.id}`, { method:'DELETE' });
+            }
+            return viejas.length;
+          };
+
           const crear = async (ev) => {
             const desc = ev.tipo==='cambio'?CHECK_CAMBIO:(ev.tipo==='entrada'?CHECK_ENTRADA:CHECK_SALIDA);
             const guests = [ev.guestOut&&`Sale: ${ev.guestOut}`, ev.guestIn&&`Entra: ${ev.guestIn}`].filter(Boolean).join(' · ');
@@ -5178,6 +5240,7 @@ function DashboardScreen({ onNavigate }) {
               type:'preventivo', status:'pendiente', assignee:'Ricardo',
               dueDate: iso(ev.date),
             };
+            await limpiarPrevias(ev.unitId, iso(ev.date));
             const r = await authFetch('/tasks',{method:'POST',body:JSON.stringify(payload)});
             return r.ok;
           };
