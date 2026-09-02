@@ -3655,9 +3655,12 @@ function MeasDetailModal({ meas, type, unit2, measurements, uname, authFetch, on
   const histAll = measurements
     .filter(m=>m.unitId===meas.unitId && m.type===type)
     .sort((a,b)=>a.week.localeCompare(b.week));
+  // En luz el valor cargado ya es el consumo del mes; en agua se calcula el
+  // delta contra la lectura anterior del medidor.
+  const esMensual = type === 'luz';
   const hist = histAll.map((m,idx)=>{
     const prev = idx>0 ? histAll[idx-1] : null;
-    const cons = prev ? m.value - prev.value : null;
+    const cons = esMensual ? m.value : (prev ? m.value - prev.value : null);
     return { ...m, cons };
   }).reverse();
 
@@ -3686,10 +3689,14 @@ function MeasDetailModal({ meas, type, unit2, measurements, uname, authFetch, on
           <div className="mtitle" style={{marginBottom:0}}>{uname(meas.unitId)}</div>
           <span style={{fontSize:11,color:'var(--muted)',background:'var(--bg)',borderRadius:6,padding:'3px 8px'}}>{type==='agua'?'💧 Agua':'⚡ Luz'}</span>
         </div>
-        <div style={{fontSize:11,color:'var(--muted)',marginBottom:14}}>Semana {meas.week?.split('-W')[1]} · {meas.week?.split('-W')[0]}</div>
+        <div style={{fontSize:11,color:'var(--muted)',marginBottom:14}}>
+          {String(meas.week||'').includes('-W')
+            ? `Semana ${meas.week.split('-W')[1]} · ${meas.week.split('-W')[0]}`
+            : meas.week}
+        </div>
 
         <div style={{marginBottom:8}}>
-          <div style={{fontSize:11,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:5}}>Lectura ({unit2})</div>
+          <div style={{fontSize:11,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:5}}>{esMensual?`Consumo del mes (${unit2})`:`Lectura (${unit2})`}</div>
           <input className="minp" type="number" inputMode="decimal" value={editVal} onChange={e=>setEditVal(e.target.value)} style={{fontSize:18,fontWeight:700}}/>
         </div>
 
@@ -3709,12 +3716,14 @@ function MeasDetailModal({ meas, type, unit2, measurements, uname, authFetch, on
           ):hist.map((h,k)=>(
             <div key={h.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 14px',borderBottom:k<hist.length-1?'1px solid var(--border)':'none',background:h.id===meas.id?'rgba(201,150,58,.08)':'transparent'}}>
               <div>
-                <div style={{fontSize:12,fontWeight:700,color:'var(--text)'}}>Sem. {h.week?.split('-W')[1]}</div>
-                <div style={{fontSize:10,color:'var(--muted)'}}>{h.week?.split('-W')[0]}</div>
+                <div style={{fontSize:12,fontWeight:700,color:'var(--text)'}}>
+                  {String(h.week||'').includes('-W') ? `Sem. ${h.week.split('-W')[1]}` : h.week.split('-')[1]}
+                </div>
+                <div style={{fontSize:10,color:'var(--muted)'}}>{String(h.week||'').split('-')[0]}</div>
               </div>
               <div style={{textAlign:'right'}}>
                 <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{h.value} <span style={{fontSize:9,fontWeight:400,color:'var(--muted)'}}>{unit2}</span></div>
-                {h.cons!=null&&(
+                {!esMensual&&h.cons!=null&&(
                   <div style={{fontSize:10,fontWeight:700,color:h.cons<0?'var(--urgent)':h.cons>0?'var(--done)':'var(--muted)'}}>
                     {h.cons>=0?'+':''}{h.cons.toFixed(1)} {unit2}
                   </div>
@@ -3811,6 +3820,10 @@ function RecordsScreen() {
   const periodSub = () => {
     if (viewMode === 'week') return getISOWeek(offset);
     if (viewMode === 'month') {
+      if (type === 'luz') {
+        const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+      }
       const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
       const wks = weeksInMonth(d.getFullYear(), d.getMonth());
       return `${wks.length} semanas`;
@@ -4014,8 +4027,104 @@ function RecordsScreen() {
     }).filter(Boolean);
   };
 
-  const rows = viewMode==='week' ? getWeekData() : [];
-  const unitGroups = viewMode==='month' ? getMonthUnits() : viewMode==='year' ? getYearUnits() : [];
+  // ── Luz: registro mensual ────────────────────────────────────────────
+  // El agua se lee del medidor cada lunes y la app calcula el delta. La luz
+  // llega en la factura de ELMAR ya como consumo del mes, así que el valor
+  // cargado ES el consumo: no hay resta contra el período anterior.
+  // La clave distingue los dos formatos: "2026-W36" semanal, "2026-09" mensual.
+  const esLuz = type === 'luz';
+  const monthKey = (offsetMeses) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - offsetMeses, 1);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  };
+  const mesLabel = mk => {
+    const M = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    const [y,m] = mk.split('-');
+    return `${M[parseInt(m,10)-1]} ${y}`;
+  };
+  // Noches ocupadas de un mes completo
+  const nightsInMonth = (uid, mk) => {
+    const [y,m] = mk.split('-').map(Number);
+    const desde = Math.floor(Date.UTC(y, m-1, 1)/86400000);
+    const hasta = Math.floor(Date.UTC(y, m, 1)/86400000);
+    const dias = new Set();
+    (reservations||[]).forEach(r=>{
+      if (r.unitId !== uid) return;
+      const a = Math.max(desde, arubaDay(r.checkIn));
+      const b = Math.min(hasta, arubaDay(r.checkOut));
+      for (let d=a; d<b; d++) dias.add(d);
+    });
+    return dias.size;
+  };
+
+  const getLuzMes = () => {
+    const mk = monthKey(offset);
+    const MIN_ABS   = 60;  // kWh: por debajo, los % son ruido
+    const MIN_VACIO = 30;
+    return measurements.filter(m=>m.type==='luz' && m.week===mk).map(m=>{
+      const consumption = m.value;           // el valor cargado ES el consumo
+      const isSpecial = !!SPECIAL[m.unitId];
+      const nights = isSpecial ? null : nightsInMonth(m.unitId, mk);
+
+      // Historial: consumo por noche de los meses anteriores de esta unidad
+      const hist = [], spark = [];
+      for (let k=12; k>=1; k--) {
+        const mkA = monthKey(offset + k);
+        const a = measurements.find(p=>p.unitId===m.unitId&&p.type==='luz'&&p.week===mkA);
+        if (!a) continue;
+        spark.push(a.value);
+        const nn = isSpecial ? 0 : nightsInMonth(m.unitId, mkA);
+        if (nn > 0) hist.push(a.value / nn);
+      }
+      spark.push(consumption);
+      const avgPerNight = hist.length >= 3 ? hist.reduce((s,h)=>s+h,0)/hist.length : null;
+
+      let alert = null;
+      if (isSpecial) {
+        const avgMes = spark.length >= 4 ? spark.slice(0,-1).reduce((s,c)=>s+c,0)/(spark.length-1) : null;
+        if (avgMes && avgMes > 0 && consumption >= MIN_ABS) {
+          const pct = ((consumption - avgMes)/avgMes)*100;
+          if (pct >= 60)       alert = { kind:'alto', direction:'up',   pct:Math.round(pct), text:`${Math.round(pct)}% sobre su promedio mensual` };
+          else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)), text:`${Math.round(Math.abs(pct))}% bajo su promedio mensual` };
+        }
+      } else if (nights === 0 && consumption >= MIN_VACIO) {
+        alert = { kind:'vacio', direction:'up', pct:null, text:'Consumo con la unidad vacía todo el mes' };
+      } else if (nights > 0 && avgPerNight && avgPerNight > 0 && consumption >= MIN_ABS) {
+        const pn = consumption / nights;
+        const pct = ((pn - avgPerNight)/avgPerNight)*100;
+        if (pct >= 60)       alert = { kind:'alto', direction:'up',   pct:Math.round(pct), text:`${Math.round(pct)}% sobre su promedio por noche ocupada` };
+        else if (pct <= -60) alert = { kind:'bajo', direction:'down', pct:Math.round(Math.abs(pct)), text:`${Math.round(Math.abs(pct))}% bajo su promedio por noche ocupada` };
+      }
+      return { ...m, consumption, alert, nights, avgPerNight, spark, isSpecial,
+               label: uname(m.unitId), sub: null };
+    });
+  };
+
+  const getLuzAno = () => {
+    const MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+    const year = now.getFullYear() - offset;
+    return UNIT_IDS.map(uid=>{
+      const isSpecial = !!SPECIAL[uid];
+      const periods = Array.from({length:12},(_,mi)=>{
+        const mk = `${year}-${String(mi+1).padStart(2,'0')}`;
+        const m = measurements.find(p=>p.unitId===uid&&p.type==='luz'&&p.week===mk);
+        return { label: MESES[mi], consumption: m ? m.value : null,
+                 nights: (m && !isSpecial) ? nightsInMonth(uid, mk) : null,
+                 hasData: !!m };
+      }).filter(p=>p.hasData);
+      if (!periods.length) return null;
+      const total = periods.reduce((s,p)=>s+(p.consumption||0),0);
+      const nights = isSpecial ? null : periods.reduce((s,p)=>s+(p.nights||0),0);
+      return { uid, unitLabel: uname(uid), periods, total, nights, isSpecial };
+    }).filter(Boolean);
+  };
+
+  const rows = esLuz
+    ? (viewMode==='month' ? getLuzMes() : [])
+    : (viewMode==='week' ? getWeekData() : []);
+  const unitGroups = esLuz
+    ? (viewMode==='year' ? getLuzAno() : [])
+    : (viewMode==='month' ? getMonthUnits() : viewMode==='year' ? getYearUnits() : []);
   const unit2 = type==='agua'?'m³':'kWh';
 
   // ── Ranking comparativo: total de consumo por unidad en el período ──
@@ -4028,7 +4137,11 @@ function RecordsScreen() {
   const maxCompare = compareData.length ? Math.max(...compareData.map(d=>Math.abs(d.total))) : 0;
 
   // ── Save ──────────────────────────────────────────────────────
-  const currentWeekStr = getISOWeek(viewMode==='week'?offset:0);
+  // Clave del período según el tipo: la luz se registra por mes
+  const claveGuardado = nm.type==='luz'
+    ? monthKey(viewMode==='month' && type==='luz' ? offset : 0)
+    : getISOWeek(viewMode==='week'?offset:0);
+  const currentWeekStr = claveGuardado;
   const prevWeekStr    = getISOWeek(viewMode==='week'?offset+1:1);
   const unitN = parseInt(nm.unitId);
   const previewPrev = measurements.find(m=>m.unitId===unitN&&m.type===nm.type&&m.week===prevWeekStr);
@@ -4125,6 +4238,20 @@ function RecordsScreen() {
 
     // Build rows: one per unit per week
     const exportRows = [];
+
+    // La luz se guarda por mes: una fila por unidad, sin recorrer semanas
+    if (type === 'luz') {
+      const mk = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+      for (const m of measurements.filter(x=>x.type==='luz'&&x.week===mk)) {
+        const fila = getLuzMes().find(r=>r.unitId===m.unitId);
+        exportRows.push({ week: mk, unitLabel: uname(m.unitId), value: m.value,
+                          consumption: m.value, alert: fila?.alert || null, unit,
+                          nights: fila?.isSpecial ? null : (fila?.nights ?? null),
+                          isSpecial: !!SPECIAL[m.unitId] });
+      }
+      return { monthLabel, exportRows, unit, wks:[mk] };
+    }
+
     for (const ws of wks) {
       const wkMeasurements = measurements.filter(m=>m.type===type&&m.week===ws);
       for (const m of wkMeasurements) {
@@ -4243,11 +4370,12 @@ function RecordsScreen() {
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
           <div className="header-title">Registros</div>
           <div style={{display:'flex',gap:5,position:'relative'}}>
-            {viewMode==='week'&&<button className="hbtn" style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:700,display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}} onClick={()=>{setScanIdx(0);setScanVal('');setScanDone(false);setScanResults([]);setShowScan(true);}}>
+            {(viewMode==='week'||(esLuz&&viewMode==='month'))&&<button className="hbtn" style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:700,display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}} onClick={()=>{setScanIdx(0);setScanVal('');setScanDone(false);setScanResults([]);setShowScan(true);}}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
               Toma rápida
             </button>}
-            {viewMode==='week'&&<button className="hbtn hbtn-g" onClick={()=>setShowAdd(true)}><Ic d={D.plus} sz={14}/></button>}
+            {(viewMode==='week'||(esLuz&&viewMode==='month'))&&
+              <button className="hbtn hbtn-g" onClick={()=>{setNm(p=>({...p,type}));setShowAdd(true);}}><Ic d={D.plus} sz={14}/></button>}
             {isAdmin&&<button className="hbtn" title="Exportar" onClick={()=>setShowExport(v=>!v)} style={{fontSize:16,fontWeight:700,letterSpacing:1,lineHeight:1}}>⋯</button>}
             {showExport&&(
               <>
@@ -4271,12 +4399,13 @@ function RecordsScreen() {
         {/* Type selector */}
         <div className="rtype-row">
           <button className={`rtbtn ${type==='agua'?'rt-agua':''}`} style={{opacity:type==='agua'?1:.45}} onClick={()=>setType('agua')}>💧 Agua</button>
-          <button className={`rtbtn ${type==='luz'?'rt-luz':''}`}  style={{opacity:type==='luz'?1:.45}}  onClick={()=>setType('luz')}>⚡ Luz</button>
+          <button className={`rtbtn ${type==='luz'?'rt-luz':''}`}  style={{opacity:type==='luz'?1:.45}}
+            onClick={()=>{ setType('luz'); if(viewMode==='week'){ setViewMode('month'); setOffset(0); } }}>⚡ Luz</button>
         </div>
 
         {/* View mode selector */}
         <div style={{display:'flex',gap:4,marginBottom:8}}>
-          {['week','month','year'].map(m=>(
+          {(esLuz?['month','year']:['week','month','year']).map(m=>(
             <button key={m} onClick={()=>{setViewMode(m);setOffset(0);}} style={{
               flex:1,padding:'5px 4px',borderRadius:7,border:'1.5px solid',fontFamily:'var(--sans)',
               fontSize:11,fontWeight:700,cursor:'pointer',transition:'all .12s',
@@ -4367,12 +4496,12 @@ function RecordsScreen() {
             )
           ) :
 
-          viewMode==='week' ? (
+          (viewMode==='week' || (esLuz && viewMode==='month')) ? (
             rows.length===0 ? (
               <div className="empty">
                 <div className="empty-icon"><span style={{fontSize:22}}>{type==='agua'?'💧':'⚡'}</span></div>
                 <div className="empty-t">Sin registros</div>
-                <div className="empty-s">No hay mediciones de {type} para esta semana.</div>
+                <div className="empty-s">No hay mediciones de {type} para {esLuz?'este mes':'esta semana'}.</div>
               </div>
             ) : (
               <>
@@ -4406,7 +4535,7 @@ function RecordsScreen() {
                               </span>
                               <span style={{fontSize:9,color:'var(--muted)'}}>
                                 {row.isSpecial ? 'medidor común'
-                                  : row.nights===0?'vacía':`${row.nights} noche${row.nights!==1?'s':''}`}
+                                  : row.nights===0?(esLuz?'vacía todo el mes':'vacía'):`${row.nights} noche${row.nights!==1?'s':''}`}
                                 {!row.isSpecial&&row.nights>0&&row.consumption>0?` · ${perNightShort(row.consumption,row.nights)}`:''}
                               </span>
                               {row.alert&&(
@@ -4554,9 +4683,18 @@ function RecordsScreen() {
               <select className="minp msel" value={nm.unitId} onChange={e=>setNm(p=>({...p,unitId:e.target.value}))}>
                 {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
               </select></div>
-            <div className="msec"><span className="mlbl">Lectura actual ({nm.type==='agua'?'m³':'kWh'})</span>
-              <input className="minp" type="number" value={nm.value} onChange={e=>setNm(p=>({...p,value:e.target.value}))} placeholder="0.00"/></div>
-            {nm.value&&(
+            <div className="msec">
+              <span className="mlbl">
+                {nm.type==='agua' ? 'Lectura actual (m³)' : 'Consumo del mes (kWh)'}
+              </span>
+              <input className="minp" type="number" value={nm.value} onChange={e=>setNm(p=>({...p,value:e.target.value}))} placeholder="0.00"/>
+              {nm.type==='luz'&&(
+                <div style={{fontSize:10,color:'var(--muted)',marginTop:4,lineHeight:1.4}}>
+                  El consumo que figura en la factura de ELMAR, no la lectura del medidor.
+                </div>
+              )}
+            </div>
+            {nm.type==='agua'&&nm.value&&(
               <div style={{borderRadius:9,marginBottom:12}}>
                 {previewPrev?(
                   <div style={{background:'var(--gold-dim)',border:'1px solid var(--border2)',borderRadius:9,padding:'10px 13px'}}>
@@ -4582,7 +4720,7 @@ function RecordsScreen() {
               </div>
             )}
             <div style={{fontSize:11,color:'var(--muted)',background:'var(--gold-dim)',borderRadius:8,padding:'8px 12px',marginBottom:4}}>
-              📅 Se registrará para: <strong>{currentWeekStr}</strong>
+              📅 Se registrará para: <strong>{nm.type==='luz'?mesLabel(claveGuardado):claveGuardado}</strong>
             </div>
             <div className="macts">
               <button className="mcancel" onClick={()=>setShowAdd(false)}>Cancelar</button>
@@ -4594,16 +4732,19 @@ function RecordsScreen() {
 
       {/* ── Scan Modal ─────────────────────────────────────────── */}
       {showScan&&(()=>{
-        const currentWk = getISOWeek(0);
+        // La toma rápida sirve para los dos: agua por semana, luz por mes
+        const currentWk = esLuz ? monthKey(offset) : getISOWeek(0);
+        const prevKey   = esLuz ? monthKey(offset+1) : getISOWeek(1);
         const uid = scanUnits[scanIdx];
         const unitName = uid ? uname(uid) : '';
-        const prevM = uid ? measurements.find(m=>m.unitId===uid&&m.type==='agua'&&m.week===getISOWeek(1)) : null;
+        const prevM = uid ? measurements.find(m=>m.unitId===uid&&m.type===type&&m.week===prevKey) : null;
+        const uni   = esLuz ? 'kWh' : 'm³';
 
         const saveScan = async () => {
           if (!scanVal || !uid) return;
           setScanSaved(true);
           const r = await authFetch('/measurements',{method:'POST',body:JSON.stringify({
-            unitId:uid, type:'agua', value:Number(scanVal), week:currentWk
+            unitId:uid, type, value:Number(scanVal), week:currentWk
           })});
           if (r.ok) {
             const allM = await authFetch('/measurements').then(r2=>r2.ok?r2.json():[]);
@@ -4635,12 +4776,12 @@ function RecordsScreen() {
                 <div style={{textAlign:'center',padding:'8px 0 12px'}}>
                   <div style={{fontSize:36,marginBottom:8}}>✅</div>
                   <div style={{fontSize:17,fontWeight:700,fontFamily:'var(--serif)',marginBottom:4}}>Toma completada</div>
-                  <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>{scanResults.length} de {scanUnits.length} unidades registradas — {currentWk}</div>
+                  <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>{scanResults.length} de {scanUnits.length} unidades registradas — {esLuz?mesLabel(currentWk):currentWk}</div>
                   <div style={{background:'var(--bg)',borderRadius:10,padding:'10px 12px',marginBottom:16,maxHeight:220,overflowY:'auto',textAlign:'left'}}>
                     {scanResults.map((r,i)=>(
                       <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:'1px solid var(--border)',fontSize:13}}>
                         <span style={{fontWeight:600}}>{r.name}</span>
-                        <span style={{color:'var(--gold)'}}>{r.value} m³</span>
+                        <span style={{color:'var(--gold)'}}>{r.value} {uni}</span>
                       </div>
                     ))}
                   </div>
@@ -4651,7 +4792,9 @@ function RecordsScreen() {
               ) : (
                 <>
                   <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
-                    <div style={{fontSize:11,color:'var(--muted)',fontWeight:600}}>💧 AGUA — {currentWk}</div>
+                    <div style={{fontSize:11,color:'var(--muted)',fontWeight:600}}>
+                      {esLuz?`⚡ LUZ — ${mesLabel(currentWk)}`:`💧 AGUA — ${currentWk}`}
+                    </div>
                     <div style={{fontSize:11,color:'var(--muted)'}}>{scanIdx+1} / {scanUnits.length}</div>
                   </div>
                   {/* Progress bar */}
@@ -4660,9 +4803,9 @@ function RecordsScreen() {
                   </div>
                   <div style={{fontSize:24,fontWeight:700,fontFamily:'var(--serif)',marginBottom:2}}>{unitName}</div>
                   {prevM ? (
-                    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>Semana anterior: <strong>{prevM.value} m³</strong></div>
+                    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>{esLuz?'Mes anterior':'Semana anterior'}: <strong>{prevM.value} {uni}</strong></div>
                   ) : (
-                    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>Sin lectura anterior</div>
+                    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>Sin registro anterior</div>
                   )}
                   <input
                     autoFocus
