@@ -3811,6 +3811,12 @@ function RecordsScreen() {
   const [saveAlert, setSaveAlert] = useState(null);
   const [nm, setNm] = useState({unitId:1,type:'agua',value:''});
   const [showScan,  setShowScan]  = useState(false);
+  // Carga por unidad: el flujo inverso a la toma rápida. Sirve para cargar de
+  // una vez todos los períodos de una misma casa (ej. un año de facturas).
+  const [showUnidad, setShowUnidad] = useState(false);
+  const [ueUnit,     setUeUnit]     = useState(1);
+  const [ueVals,     setUeVals]     = useState({});
+  const [ueBusy,     setUeBusy]     = useState('');
   const [scanIdx,   setScanIdx]   = useState(0);
   const [scanVal,   setScanVal]   = useState('');
   const [scanSaved, setScanSaved] = useState(false);
@@ -4178,6 +4184,26 @@ function RecordsScreen() {
     }).filter(Boolean);
   };
 
+  // Períodos de un año para la carga por unidad: 12 meses en luz, las semanas
+  // ISO del año en agua.
+  const periodosDelAno = (year) => {
+    if (esLuz) {
+      const M = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+      return Array.from({length:12},(_,i)=>({
+        key: `${year}-${String(i+1).padStart(2,'0')}`, label: M[i],
+      }));
+    }
+    const keys = [];
+    const d = new Date(Date.UTC(year,0,1));
+    while (d.getUTCFullYear() <= year) {
+      const k = getISOWeekFromDate(new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+      if (k.startsWith(String(year)) && !keys.includes(k)) keys.push(k);
+      d.setUTCDate(d.getUTCDate()+7);
+      if (d.getUTCFullYear() > year) break;
+    }
+    return keys.map(k=>({ key:k, label:`Semana ${k.split('-W')[1]}` }));
+  };
+
   const rows = esLuz
     ? (viewMode==='month' ? getLuzMes() : [])
     : (viewMode==='week' ? getWeekData() : []);
@@ -4433,6 +4459,12 @@ function RecordsScreen() {
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
               Toma rápida
             </button>}
+            <button className="hbtn" title="Cargar un año de una casa"
+              onClick={()=>{ const a=UNIT_IDS.find(x=>!SPECIAL[x])||1; setUeUnit(a); setUeVals({}); setShowUnidad(true); }}
+              style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',
+                padding:'5px 9px',borderRadius:8,fontSize:11,fontWeight:700,whiteSpace:'nowrap'}}>
+              🏠 Por casa
+            </button>
             {(viewMode==='week'||(esLuz&&viewMode==='month'))&&
               <button className="hbtn hbtn-g" onClick={()=>{setNm(p=>({...p,type}));setShowAdd(true);}}><Ic d={D.plus} sz={14}/></button>}
             {isAdmin&&<button className="hbtn" title="Exportar" onClick={()=>setShowExport(v=>!v)} style={{fontSize:16,fontWeight:700,letterSpacing:1,lineHeight:1}}>⋯</button>}
@@ -4788,6 +4820,95 @@ function RecordsScreen() {
           </div>
         </div>
       )}
+
+      {/* ── Carga por casa: todos los períodos de una unidad ── */}
+      {showUnidad&&(()=>{
+        const year = now.getFullYear() - (viewMode==='year' ? offset : 0);
+        const periodos = periodosDelAno(year);
+        const guardado = k => measurements.find(m=>m.unitId===ueUnit&&m.type===type&&m.week===k);
+        const valorDe = k => ueVals[k] !== undefined ? ueVals[k] : (guardado(k)?.value ?? '');
+        const cambiados = periodos.filter(p=>{
+          const v = ueVals[p.key];
+          if (v === undefined || v === '') return false;
+          return Number(v) !== (guardado(p.key)?.value ?? null);
+        });
+
+        const guardarTodo = async () => {
+          if (cambiados.length===0) return;
+          let n = 0;
+          for (const p of cambiados) {
+            setUeBusy(`Guardando ${++n} de ${cambiados.length}...`);
+            await authFetch('/measurements',{method:'POST',body:JSON.stringify({
+              unitId: ueUnit, type, value: Number(ueVals[p.key]), week: p.key
+            })});
+          }
+          const allM = await authFetch('/measurements').then(r=>r.ok?r.json():null);
+          if (allM) setM(allM);
+          setUeBusy('');
+          setUeVals({});
+          setShowUnidad(false);
+        };
+
+        return (
+          <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&!ueBusy&&setShowUnidad(false)}>
+            <div style={{background:'var(--surface)',borderRadius:14,padding:'16px',maxWidth:400,width:'94%',
+              maxHeight:'88vh',display:'flex',flexDirection:'column'}}>
+              <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:3}}>
+                {esLuz?'⚡ Luz':'💧 Agua'} · {year}
+              </div>
+              <div style={{fontSize:10.5,color:'var(--muted)',marginBottom:11,lineHeight:1.4}}>
+                {esLuz
+                  ? 'Consumo de cada mes según la factura de ELMAR.'
+                  : 'Lectura del medidor en cada semana.'}
+              </div>
+
+              <select className="minp msel" value={ueUnit} disabled={!!ueBusy}
+                onChange={e=>{ setUeUnit(Number(e.target.value)); setUeVals({}); }}
+                style={{marginBottom:10}}>
+                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+              </select>
+
+              <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:5}} className="hide-scroll">
+                {periodos.map(p=>{
+                  const ya = guardado(p.key);
+                  const editado = ueVals[p.key] !== undefined && String(ueVals[p.key]) !== String(ya?.value ?? '');
+                  return (
+                    <div key={p.key} style={{display:'flex',alignItems:'center',gap:9,
+                      background:editado?'rgba(201,150,58,.09)':'var(--bg)',
+                      border:`1px solid ${editado?'var(--gold)':'var(--border)'}`,
+                      borderRadius:9,padding:'6px 10px'}}>
+                      <div style={{width:82,flexShrink:0}}>
+                        <div style={{fontSize:11.5,fontWeight:700,color:'var(--text)'}}>{p.label}</div>
+                        {ya&&<div style={{fontSize:8.5,color:'var(--done)'}}>ya cargado</div>}
+                      </div>
+                      <input type="number" inputMode="decimal" disabled={!!ueBusy}
+                        value={valorDe(p.key)}
+                        onChange={e=>setUeVals(v=>({...v,[p.key]:e.target.value}))}
+                        placeholder="—"
+                        style={{flex:1,minWidth:0,background:'var(--surface)',border:'1px solid var(--border)',
+                          borderRadius:7,padding:'7px 9px',fontSize:14,fontWeight:700,color:'var(--text)',
+                          outline:'none',textAlign:'right',fontFamily:'monospace'}}/>
+                      <span style={{fontSize:10,color:'var(--muted)',width:26,flexShrink:0}}>{unit2}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{display:'flex',gap:8,marginTop:12}}>
+                <button onClick={()=>!ueBusy&&setShowUnidad(false)} disabled={!!ueBusy}
+                  style={{flex:1,background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)',
+                    borderRadius:9,padding:'11px',fontWeight:700,fontSize:13,cursor:'pointer'}}>Cerrar</button>
+                <button onClick={guardarTodo} disabled={!!ueBusy||cambiados.length===0}
+                  style={{flex:2,background:cambiados.length?'var(--gold)':'var(--border)',color:'#1a1208',
+                    border:'none',borderRadius:9,padding:'11px',fontWeight:800,fontSize:13,
+                    cursor:cambiados.length?'pointer':'default'}}>
+                  {ueBusy || (cambiados.length ? `Guardar ${cambiados.length}` : 'Sin cambios')}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Scan Modal ─────────────────────────────────────────── */}
       {showScan&&(()=>{
