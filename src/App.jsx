@@ -4452,22 +4452,42 @@ function RecordsScreen() {
   return (
     <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
       <div className="rhead">
-        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
-          <div className="header-title">Registros</div>
-          <div style={{display:'flex',gap:5,position:'relative'}}>
-            {(viewMode==='week'||(esLuz&&viewMode==='month'))&&<button className="hbtn" style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:700,display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}} onClick={()=>{setScanIdx(0);setScanVal('');setScanDone(false);setScanResults([]);setShowScan(true);}}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-              Toma rápida
-            </button>}
-            <button className="hbtn" title="Cargar un año de una casa"
-              onClick={()=>{ const a=UNIT_IDS.find(x=>!SPECIAL[x])||1; setUeUnit(a); setUeVals({}); setShowUnidad(true); }}
-              style={{background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',color:'var(--gold2)',
-                padding:'5px 9px',borderRadius:8,fontSize:11,fontWeight:700,whiteSpace:'nowrap'}}>
-              🏠 Por casa
-            </button>
-            {(viewMode==='week'||(esLuz&&viewMode==='month'))&&
-              <button className="hbtn hbtn-g" onClick={()=>{setNm(p=>({...p,type}));setShowAdd(true);}}><Ic d={D.plus} sz={14}/></button>}
-            {isAdmin&&<button className="hbtn" title="Exportar" onClick={()=>setShowExport(v=>!v)} style={{fontSize:16,fontWeight:700,letterSpacing:1,lineHeight:1}}>⋯</button>}
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8,gap:8}}>
+          <div className="header-title" style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>Registros</div>
+          {/* Tres botones con texto no entran en pantalla angosta: van como
+              íconos, con el nombre en el title. flexShrink:0 evita que se
+              pisen entre sí cuando falta espacio. */}
+          <div style={{display:'flex',gap:6,position:'relative',alignItems:'center',flexShrink:0}}>
+            {(()=>{
+              const est = {background:'rgba(201,150,58,.15)',border:'1px solid rgba(201,150,58,.3)',
+                color:'var(--gold2)',width:32,height:32,borderRadius:8,display:'flex',
+                alignItems:'center',justifyContent:'center',padding:0,flexShrink:0,cursor:'pointer'};
+              const puedeCargar = viewMode==='week' || (esLuz && viewMode==='month');
+              return (
+                <>
+                  {puedeCargar&&(
+                    <button className="hbtn" style={est} title="Toma rápida: recorrer todas las unidades"
+                      onClick={()=>{setScanIdx(0);setScanVal('');setScanDone(false);setScanResults([]);setShowScan(true);}}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                    </button>
+                  )}
+                  <button className="hbtn" style={{...est,fontSize:15}} title="Por casa: cargar un año de una unidad"
+                    onClick={()=>{ const a=UNIT_IDS.find(x=>!SPECIAL[x])||1; setUeUnit(a); setUeVals({}); setShowUnidad(true); }}>
+                    🏠
+                  </button>
+                  {puedeCargar&&(
+                    <button className="hbtn hbtn-g" style={{...est,background:'var(--gold)',color:'#1a1208',border:'none'}}
+                      title="Agregar un registro"
+                      onClick={()=>{setNm(p=>({...p,type}));setShowAdd(true);}}>
+                      <Ic d={D.plus} sz={15}/>
+                    </button>
+                  )}
+                </>
+              );
+            })()}
+            {isAdmin&&<button className="hbtn" title="Exportar" onClick={()=>setShowExport(v=>!v)}
+              style={{width:32,height:32,borderRadius:8,padding:0,display:'flex',alignItems:'center',
+                justifyContent:'center',fontSize:17,fontWeight:700,lineHeight:1,flexShrink:0}}>⋯</button>}
             {showExport&&(
               <>
                 <div onClick={()=>setShowExport(false)} style={{position:'fixed',inset:0,zIndex:40}}/>
