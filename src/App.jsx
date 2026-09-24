@@ -408,6 +408,25 @@ const HOSTAWAY_MAP = {
   'portaalsole19':   [19],
   'portaalsole20':   [20],
   'portaalsole-sub20':[20],
+  'portaalsole8-1BR': [8],
+  'portaalsole19-2BR':[19],
+  'portaalsole17 - old':[17],
+};
+
+// Hostaway empezó a agregar sufijos a los listados ("portaalsole8-1BR",
+// "portaalsole17 - old"). Si aparece uno que no está en la lista de arriba, se
+// reconoce el número de unidad igual, siempre que el sufijo lleve letras.
+// Un sufijo solo de números ("2-3-4") es un listado multi-unidad y NO se adivina:
+// tiene que estar declarado arriba, porque tomarlo como una sola unidad
+// perdería las demás.
+const LISTADO_CON_SUFIJO = /^portaalsole(?:-sub)?(\d{1,2})[\s-]+[0-9]*[a-z][\w\s-]*$/i;
+const unidadesDeListado = (hostawayId) => {
+  const id = String(hostawayId||'').trim();
+  if (HOSTAWAY_MAP[id]) return HOSTAWAY_MAP[id];
+  const m = id.match(LISTADO_CON_SUFIJO);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return UNIT_IDS.includes(n) ? [n] : null;
 };
 
 // Una estadia real nunca llega a 60 dias; los bloqueos de onboarding de
@@ -437,7 +456,7 @@ function parseHostawayWithStats(csvText) {
     if (row.type === 'owner' || row.type === 'bocobay') stats.ownerBlocks++;
     else if (row.type !== 'guest') { stats.skippedOther++; continue; }
     const hostawayId = (row.display_id||'').split('|')[0].trim().replace(/^aw-/, '');
-    if (!HOSTAWAY_MAP[hostawayId]) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
+    if (!unidadesDeListado(hostawayId)) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
     const dateParts = (row.display_dates||'').split(' - ');
     if (dateParts.length !== 2) { stats.skippedBadDate++; continue; }
     if (row.status === 'confirmed') stats.confirmed++;
@@ -477,7 +496,7 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
     // display_id trae "aw-portaalsole10 | 30492867": la segunda parte es el
     // numero de reserva de Hostaway, estable aunque cambien fechas o monto.
     const reservationId = ((row.display_id||'').split('|')[1]||'').trim();
-    const unitIds = HOSTAWAY_MAP[hostawayId];
+    const unitIds = unidadesDeListado(hostawayId);
     if (!unitIds) continue;
 
     // Parse dates: "May 12 - May 25" or "May 12 - Jan 1 2028"
@@ -8650,7 +8669,6 @@ ${bloques}
                         </div>
                         <div style={{display:'flex',flexDirection:'column',gap:6}}>
                           {items.map(h=>tarjeta(h))}
-                          })}
                         </div>
                       </div>
                     );
