@@ -1152,10 +1152,28 @@ function NewTaskModal({ onClose, onSaved, defaultUnitId, fotoInicial }) {
 
   // Sacar la foto desde la app evita que quede en la galería del teléfono:
   // va comprimida directo a la tarea, sin ocupar memoria del dispositivo.
+  const MAX_FOTOS = 12;   // varias fotos comprimidas viven en memoria hasta guardar
+  const [leyendo, setLeyendo] = useState('');
   const agregarFoto = async (file) => {
     if (!file) return;
     const data = await compressImage(file, 1200, 0.8);
     if (data) setFotos(prev=>[...prev, data]);
+  };
+  // Varias a la vez desde la galería: se comprimen de a una (en paralelo, un
+  // teléfono con poca memoria puede cerrar la app) y se muestran a medida que
+  // están listas.
+  const agregarFotos = async (files) => {
+    if (!files.length) return;
+    const lugar = MAX_FOTOS - fotos.length;
+    if (lugar <= 0) { alert(`Máximo ${MAX_FOTOS} fotos por tarea. Podés agregar más después, desde el detalle.`); return; }
+    const aProcesar = files.slice(0, lugar);
+    for (let i = 0; i < aProcesar.length; i++) {
+      setLeyendo(aProcesar.length > 1 ? `${i+1} de ${aProcesar.length}` : '');
+      const data = await compressImage(aProcesar[i], 1200, 0.8);
+      if (data) setFotos(prev=>[...prev, data]);
+    }
+    setLeyendo('');
+    if (files.length > lugar) alert(`Se agregaron ${lugar} de ${files.length}: el máximo es ${MAX_FOTOS} por tarea. Las demás podés agregarlas después, desde el detalle.`);
   };
 
   const save = async () => {
@@ -1236,9 +1254,9 @@ function NewTaskModal({ onClose, onSaved, defaultUnitId, fotoInicial }) {
               padding:'12px 8px',borderRadius:10,border:'2px dashed var(--border)',cursor:busy?'default':'pointer',
               background:'var(--bg)',opacity:busy?.5:1}}>
               <span style={{fontSize:17,lineHeight:1}}>🖼️</span>
-              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>Galería</span>
-              <input type="file" accept="image/*" style={{display:'none'}} disabled={busy}
-                onChange={e=>{ agregarFoto(e.target.files[0]); e.target.value=''; }}/>
+              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>{leyendo?`Leyendo ${leyendo}...`:'Galería'}</span>
+              <input type="file" accept="image/*" multiple style={{display:'none'}} disabled={busy||!!leyendo}
+                onChange={e=>{ const fs=[...e.target.files]; e.target.value=''; agregarFotos(fs); }}/>
             </label>
           </div>
           <div style={{fontSize:9.5,color:'var(--muted)',marginTop:5,lineHeight:1.4}}>
@@ -1288,6 +1306,7 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
   const [editTitle, setEditTitle] = useState(null); // null = no editando; string = valor en edición
   const [lightbox, setLightbox] = useState(null);
   const [photoUploading, setPhotoUploading] = useState(null); // 'start' | 'complete' | null
+  const [uploadProg, setUploadProg] = useState('');               // "3 de 8" mientras sube varias
   const [notePhoto, setNotePhoto] = useState(null); // base64 photo attached to note
   const [notePhotoUploading, setNotePhotoUploading] = useState(false);
 
@@ -1451,21 +1470,30 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
                 ? t[arrField]
                 : (type==='start' ? (t.photoStart ? [t.photoStart] : []) : (t.photoComplete ? [t.photoComplete] : []));
 
-              const uploadPhoto = async file => {
-                if (photoUploading) return;
+              // Varias fotos a la vez: se suben de a una, EN FILA. El servidor lee la
+              // lista de fotos de la tarea, le agrega la nueva y la guarda; si dos
+              // subidas corrieran juntas, la segunda pisaría a la primera y una foto
+              // se perdería sin ningún aviso.
+              const uploadPhotos = async files => {
+                if (photoUploading || !files.length) return;
                 setPhotoUploading(type);
+                let fallidas = 0;
                 try {
-                  const data = await compressImage(file);
-                  if (data) {
-                    const r = await authFetch(`/tasks/${t.id}/photo?type=${type}`,{method:'POST',body:JSON.stringify({data})});
-                    if (r.ok) {
-                      const updated = await r.json();
-                      setT(updated);
-                    }
+                  for (let i = 0; i < files.length; i++) {
+                    setUploadProg(files.length > 1 ? `${i+1} de ${files.length}` : '');
+                    try {
+                      const data = await compressImage(files[i]);
+                      if (!data) { fallidas++; continue; }
+                      const r = await authFetch(`/tasks/${t.id}/photo?type=${type}`,{method:'POST',body:JSON.stringify({data})});
+                      if (r.ok) setT(await r.json());
+                      else fallidas++;
+                    } catch { fallidas++; }
                   }
                 } finally {
                   setPhotoUploading(null);
+                  setUploadProg('');
                 }
+                if (fallidas) alert(`${fallidas} de ${files.length} foto${files.length!==1?'s':''} no se pudieron subir. Probá agregarlas de nuevo.`);
               };
 
               const deletePhoto = async (idx) => {
@@ -1505,11 +1533,11 @@ function TaskDetailModal({ task, onClose, onUpdated }) {
                     borderRadius:10,border:'1.5px dashed var(--border)',cursor:uploading?'default':'pointer',
                     background:'transparent',opacity:uploading?0.5:1}}>
                     {uploading
-                      ? <><div className="spinner" style={{width:14,height:14,borderWidth:2,margin:0}}/><span style={{fontSize:11,color:'var(--muted)'}}>Subiendo...</span></>
-                      : <><span style={{fontSize:18,opacity:.4,lineHeight:1}}>+</span><span style={{fontSize:11,color:'var(--muted)',fontWeight:600}}>Agregar foto</span></>
+                      ? <><div className="spinner" style={{width:14,height:14,borderWidth:2,margin:0}}/><span style={{fontSize:11,color:'var(--muted)'}}>Subiendo{uploadProg?` ${uploadProg}`:''}...</span></>
+                      : <><span style={{fontSize:18,opacity:.4,lineHeight:1}}>+</span><span style={{fontSize:11,color:'var(--muted)',fontWeight:600}}>Agregar fotos</span></>
                     }
-                    <input type="file" accept="image/*" style={{display:'none'}} disabled={!!uploading}
-                      onChange={e=>{ const f=e.target.files[0]; if(f) uploadPhoto(f); e.target.value=''; }}/>
+                    <input type="file" accept="image/*" multiple style={{display:'none'}} disabled={!!uploading}
+                      onChange={e=>{ const fs=[...e.target.files]; e.target.value=''; if(fs.length) uploadPhotos(fs); }}/>
                   </label>
                 </div>
               );
