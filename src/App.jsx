@@ -974,6 +974,27 @@ const isoWeekOf = (date) => {
 
 // Comprime una imagen en el cliente antes de subirla (máx 1200px, JPEG 80%).
 // Reduce ~5-10x el peso → ahorra espacio en Cloudinary y memoria en el móvil.
+// Campos de monto: el <input type="number"> solo acepta punto como decimal.
+// En un teléfono configurado en español el teclado ofrece coma, y el navegador
+// descarta el valor entero ("12,50" llega como vacío). Por eso los campos son de
+// texto con teclado numérico, y estas dos funciones aceptan coma o punto.
+const soloDecimal = (v) => {
+  let s = String(v ?? '').replace(/[^0-9.,]/g, '');
+  if (s.includes(',') && s.includes('.')) {
+    // Monto pegado con miles: "9,696.00" o "9.696,00". El último separador es
+    // el decimal y el otro es de miles. Sin esto, "9,696.00" se leería como 9,69.
+    const ult = Math.max(s.lastIndexOf(','), s.lastIndexOf('.'));
+    return s.slice(0, ult).replace(/[.,]/g, '') + s[ult] + s.slice(ult + 1).replace(/[.,]/g, '');
+  }
+  const i = s.search(/[.,]/);                       // un solo separador decimal
+  if (i >= 0) s = s.slice(0, i + 1) + s.slice(i + 1).replace(/[.,]/g, '');
+  return s;
+};
+const aNumero = (v) => {
+  const n = parseFloat(String(v ?? '').replace(',', '.'));
+  return isNaN(n) ? NaN : n;
+};
+
 const compressImage = (file, maxDim=1200, quality=0.8) => new Promise((resolve) => {
   const rd = new FileReader();
   rd.onload = e => {
@@ -3743,7 +3764,7 @@ function MeasDetailModal({ meas, type, unit2, measurements, uname, authFetch, on
   }).reverse();
 
   const guardar = async () => {
-    const v = parseFloat(editVal);
+    const v = aNumero(editVal);
     if (isNaN(v)) return;
     setBusy(true);
     const r = await authFetch(`/measurements/${meas.id}`,{method:'PATCH',body:JSON.stringify({value:v})});
@@ -3775,7 +3796,7 @@ function MeasDetailModal({ meas, type, unit2, measurements, uname, authFetch, on
 
         <div style={{marginBottom:8}}>
           <div style={{fontSize:11,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5,marginBottom:5}}>{esMensual?`Consumo del mes (${unit2})`:`Lectura (${unit2})`}</div>
-          <input className="minp" type="number" inputMode="decimal" value={editVal} onChange={e=>setEditVal(e.target.value)} style={{fontSize:18,fontWeight:700}}/>
+          <input className="minp" type="text" inputMode="decimal" value={editVal} onChange={e=>setEditVal(soloDecimal(e.target.value))} style={{fontSize:18,fontWeight:700}}/>
         </div>
 
         <div style={{display:'flex',gap:8,marginBottom:18}}>
@@ -4249,7 +4270,7 @@ function RecordsScreen() {
   const prevWeekStr    = getISOWeek(viewMode==='week'?offset+1:1);
   const unitN = parseInt(nm.unitId);
   const previewPrev = measurements.find(m=>m.unitId===unitN&&m.type===nm.type&&m.week===prevWeekStr);
-  const previewC = nm.value && previewPrev ? Number(nm.value) - previewPrev.value : null;
+  const previewC = nm.value && previewPrev ? aNumero(nm.value) - previewPrev.value : null;
 
   const getAlertForSave = (unitId, t, allM) => {
     const ws  = getISOWeek(0);
@@ -4268,7 +4289,7 @@ function RecordsScreen() {
 
   const save = async () => {
     const r = await authFetch('/measurements',{method:'POST',body:JSON.stringify({
-      unitId:Number(nm.unitId), type:nm.type, value:Number(nm.value), week:currentWeekStr
+      unitId:Number(nm.unitId), type:nm.type, value:aNumero(nm.value), week:currentWeekStr
     })});
     if (r.ok) {
       setShowAdd(false);
@@ -4817,7 +4838,7 @@ function RecordsScreen() {
               <span className="mlbl">
                 {nm.type==='agua' ? 'Lectura actual (m³)' : 'Consumo del mes (kWh)'}
               </span>
-              <input className="minp" type="number" value={nm.value} onChange={e=>setNm(p=>({...p,value:e.target.value}))} placeholder="0.00"/>
+              <input className="minp" type="text" inputMode="decimal" value={nm.value} onChange={e=>setNm(p=>({...p,value:soloDecimal(e.target.value)}))} placeholder="0.00"/>
               {nm.type==='luz'&&(
                 <div style={{fontSize:10,color:'var(--muted)',marginTop:4,lineHeight:1.4}}>
                   El consumo que figura en la factura de ELMAR, no la lectura del medidor.
@@ -4869,7 +4890,7 @@ function RecordsScreen() {
         const cambiados = periodos.filter(p=>{
           const v = ueVals[p.key];
           if (v === undefined || v === '') return false;
-          return Number(v) !== (guardado(p.key)?.value ?? null);
+          return aNumero(v) !== (guardado(p.key)?.value ?? null);
         });
 
         const guardarTodo = async () => {
@@ -4878,7 +4899,7 @@ function RecordsScreen() {
           for (const p of cambiados) {
             setUeBusy(`Guardando ${++n} de ${cambiados.length}...`);
             await authFetch('/measurements',{method:'POST',body:JSON.stringify({
-              unitId: ueUnit, type, value: Number(ueVals[p.key]), week: p.key
+              unitId: ueUnit, type, value: aNumero(ueVals[p.key]), week: p.key
             })});
           }
           const allM = await authFetch('/measurements').then(r=>r.ok?r.json():null);
@@ -4920,9 +4941,9 @@ function RecordsScreen() {
                         <div style={{fontSize:11.5,fontWeight:700,color:'var(--text)'}}>{p.label}</div>
                         {ya&&<div style={{fontSize:8.5,color:'var(--done)'}}>ya cargado</div>}
                       </div>
-                      <input type="number" inputMode="decimal" disabled={!!ueBusy}
+                      <input type="text" inputMode="decimal" disabled={!!ueBusy}
                         value={valorDe(p.key)}
-                        onChange={e=>setUeVals(v=>({...v,[p.key]:e.target.value}))}
+                        onChange={e=>setUeVals(v=>({...v,[p.key]:soloDecimal(e.target.value)}))}
                         placeholder="—"
                         style={{flex:1,minWidth:0,background:'var(--surface)',border:'1px solid var(--border)',
                           borderRadius:7,padding:'7px 9px',fontSize:14,fontWeight:700,color:'var(--text)',
@@ -4963,12 +4984,12 @@ function RecordsScreen() {
           if (!scanVal || !uid) return;
           setScanSaved(true);
           const r = await authFetch('/measurements',{method:'POST',body:JSON.stringify({
-            unitId:uid, type, value:Number(scanVal), week:currentWk
+            unitId:uid, type, value:aNumero(scanVal), week:currentWk
           })});
           if (r.ok) {
             const allM = await authFetch('/measurements').then(r2=>r2.ok?r2.json():[]);
             setM(allM);
-            setScanResults(prev=>[...prev,{uid,name:unitName,value:Number(scanVal)}]);
+            setScanResults(prev=>[...prev,{uid,name:unitName,value:aNumero(scanVal)}]);
             setScanVal('');
             setScanSaved(false);
             if (scanIdx + 1 >= scanUnits.length) {
@@ -5028,13 +5049,13 @@ function RecordsScreen() {
                   )}
                   <input
                     autoFocus
-                    type="number"
+                    type="text"
                     inputMode="decimal"
                     className="minp"
                     style={{fontSize:26,textAlign:'center',fontWeight:700,padding:'14px',marginBottom:12}}
                     placeholder="0.00"
                     value={scanVal}
-                    onChange={e=>setScanVal(e.target.value)}
+                    onChange={e=>setScanVal(soloDecimal(e.target.value))}
                     onKeyDown={e=>{ if(e.key==='Enter'&&scanVal) saveScan(); }}
                   />
                   <div style={{display:'flex',gap:8}}>
@@ -6401,7 +6422,7 @@ function ReservationsScreen() {
                       const r = await addExpense({
                         unitId: Number(expF.unitId),
                         concept: expF.concept.trim(),
-                        amount: Number(expF.amount),
+                        amount: aNumero(expF.amount),
                         category: expF.category,
                         date: expF.date,
                       });
@@ -6455,7 +6476,7 @@ function ReservationsScreen() {
                             </div>
                             <input className="minp" value={expF.concept} onChange={e=>setExpF(p=>({...p,concept:e.target.value}))} placeholder="Concepto (ej: repuesto A/C, plomero...)"/>
                             <div style={{display:'flex',gap:8}}>
-                              <input className="minp" style={{flex:1}} type="number" inputMode="decimal" value={expF.amount} onChange={e=>setExpF(p=>({...p,amount:e.target.value}))} placeholder="Monto $"/>
+                              <input className="minp" style={{flex:1}} type="text" inputMode="decimal" value={expF.amount} onChange={e=>setExpF(p=>({...p,amount:soloDecimal(e.target.value)}))} placeholder="Monto $"/>
                               <input className="minp" style={{flex:1}} type="date" value={expF.date} onChange={e=>setExpF(p=>({...p,date:e.target.value}))}/>
                             </div>
                             <button onClick={saveExp} disabled={expBusy||!expF.concept.trim()||!expF.amount} style={{background:expF.concept.trim()&&expF.amount?'var(--gold)':'var(--border)',color:'#1a1208',border:'none',borderRadius:9,padding:'10px',fontSize:13,fontWeight:800,cursor:'pointer'}}>
@@ -6620,7 +6641,7 @@ function ReservationsScreen() {
                                 </div>
                                 <input className="minp" value={editExp.concept} onChange={e=>setEditExp(p=>({...p,concept:e.target.value}))} placeholder="Concepto"/>
                                 <div style={{display:'flex',gap:8}}>
-                                  <input className="minp" style={{flex:1}} type="number" inputMode="decimal" value={editExp.amount} onChange={e=>setEditExp(p=>({...p,amount:e.target.value}))} placeholder="Monto $"/>
+                                  <input className="minp" style={{flex:1}} type="text" inputMode="decimal" value={editExp.amount} onChange={e=>setEditExp(p=>({...p,amount:soloDecimal(e.target.value)}))} placeholder="Monto $"/>
                                   <input className="minp" style={{flex:1}} type="date" value={editExp.date} onChange={e=>setEditExp(p=>({...p,date:e.target.value}))}/>
                                 </div>
                                 <div style={{display:'flex',gap:8,marginTop:4}}>
@@ -6630,7 +6651,7 @@ function ReservationsScreen() {
                                     const r = await updateExpense(editExp.id, {
                                       unitId: Number(editExp.unitId),
                                       concept: String(editExp.concept).trim(),
-                                      amount: Number(editExp.amount),
+                                      amount: aNumero(editExp.amount),
                                       category: editExp.category,
                                       date: editExp.date,
                                     });
@@ -6648,7 +6669,7 @@ function ReservationsScreen() {
 
                         {/* ── Vista previa de importación QuickBooks ── */}
                         {qbRows&&(()=>{
-                          const rate = parseFloat(qbRate) || 1.78;
+                          const rate = aNumero(qbRate) || 1.78;
                           const conv = (a) => a / rate; // AWG → USD
                           const visibles = qbFrom ? qbRows.filter(r=>r.date>=qbFrom) : qbRows;
                           const ocultas = qbRows.length - visibles.length;
@@ -6735,7 +6756,7 @@ function ReservationsScreen() {
                                 <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,background:'rgba(201,150,58,.07)',border:'1px solid rgba(201,150,58,.2)',borderRadius:9,padding:'7px 10px'}}>
                                   <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Conversión: <strong style={{color:'var(--text)'}}>ƒ (AWG) → $ (USD)</strong></span>
                                   <span style={{fontSize:10,color:'var(--muted)'}}>Tasa</span>
-                                  <input type="number" step="0.01" value={qbRate} disabled={qbBusy} onChange={e=>setQbRate(e.target.value)}
+                                  <input type="text" inputMode="decimal" value={qbRate} disabled={qbBusy} onChange={e=>setQbRate(soloDecimal(e.target.value))}
                                     style={{width:58,fontSize:12,fontWeight:700,padding:'4px 6px',borderRadius:7,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--gold)',textAlign:'center'}}/>
                                 </div>
                                 <label style={{display:'flex',alignItems:'flex-start',gap:8,marginBottom:8,cursor:'pointer',userSelect:'none',background:'var(--bg)',border:'1px solid var(--border)',borderRadius:9,padding:'8px 10px'}}>
@@ -6885,7 +6906,7 @@ function ReservationsScreen() {
                       Subí el reporte <strong>"Lista de transacciones por fecha"</strong> de QuickBooks para comparar mes a mes lo que estima Hostaway contra lo realmente facturado y cobrado. No se guarda nada — es solo una verificación.
                     </div>
                   ):(()=>{
-                    const rate = parseFloat(qbRate) || 1.78;
+                    const rate = aNumero(qbRate) || 1.78;
                     const rows = MONTHS.map((lbl,i)=>{
                       const ym = `${incYear}-${String(i+1).padStart(2,'0')}`;
                       const hostaway = monthlyIncome[i]?.total || 0;
@@ -7683,7 +7704,7 @@ function InvoicesScreen() {
     setBusy(true); setErr('');
     try {
       const body = { vendor: vendor.trim(), destino, notes: notes.trim(), data: photo };
-      const monto = parseFloat(String(amount).replace(',','.'));
+      const monto = aNumero(amount);
       if (!isNaN(monto) && monto > 0) body.amountAwg = monto;
 
       const r = await authFetch('/invoices',{method:'POST',body:JSON.stringify(body)});
@@ -7720,7 +7741,7 @@ function InvoicesScreen() {
       destino: editInv.destino,
       notes:   String(editInv.notes||'').trim(),
     };
-    const monto = parseFloat(String(editInv.amountAwg??'').replace(',','.'));
+    const monto = aNumero(editInv.amountAwg);
     if (!isNaN(monto) && monto > 0) body.amountAwg = monto;
 
     const r = await authFetch(`/invoices/${editInv.id}`,{method:'PATCH',body:JSON.stringify(body)});
@@ -7863,7 +7884,7 @@ ${fotos}
   const fmtAwg = n => 'ƒ'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   const fmtUsd = n => '$'+(Number(n)/AWG_USD).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
-  const montoNum = parseFloat(String(amount).replace(',','.'));
+  const montoNum = aNumero(amount);
   const puedeGuardar = !!photo && !!vendor.trim() && !!destino && !busy;
   const faltante = !vendor.trim() ? 'Falta el proveedor' : !destino ? 'Elegí si es de MBL o del Condominio' : '';
 
@@ -7968,8 +7989,8 @@ ${fotos}
 
                     <div>
                       <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Monto en florines (ƒ)</div>
-                      <input className="minp" type="number" inputMode="decimal" value={amount}
-                        onChange={e=>setAmount(e.target.value)} placeholder="0.00"/>
+                      <input className="minp" type="text" inputMode="decimal" value={amount}
+                        onChange={e=>setAmount(soloDecimal(e.target.value))} placeholder="0.00"/>
                       {!isNaN(montoNum)&&montoNum>0&&(
                         <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>
                           equivale a <strong style={{color:'var(--gold)'}}>{fmtUsd(montoNum)}</strong> · tasa {AWG_USD}
@@ -8197,9 +8218,9 @@ ${fotos}
 
               <div>
                 <div style={{fontSize:9,color:'var(--muted)',fontWeight:800,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Monto en florines (ƒ)</div>
-                <input className="minp" type="number" inputMode="decimal" disabled={editBusy}
-                  value={editInv.amountAwg ?? ''} onChange={e=>setEditInv(p=>({...p,amountAwg:e.target.value}))} placeholder="0.00"/>
-                {(()=>{ const m=parseFloat(String(editInv.amountAwg??'').replace(',','.'));
+                <input className="minp" type="text" inputMode="decimal" disabled={editBusy}
+                  value={editInv.amountAwg ?? ''} onChange={e=>setEditInv(p=>({...p,amountAwg:soloDecimal(e.target.value)}))} placeholder="0.00"/>
+                {(()=>{ const m=aNumero(editInv.amountAwg);
                   return !isNaN(m)&&m>0 ? (
                     <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>
                       equivale a <strong style={{color:'var(--gold)'}}>{fmtUsd(m)}</strong> · tasa {AWG_USD}
