@@ -759,7 +759,7 @@ const parseQBFields = (l) => {
 const guessExpCategory = (nota) => {
   // El banco escribe los pagos en inglés ("MBL DEVELOPMENT N.V. LOAN PAYMENT - 15"): sin
   // "loan payment" caían en "otro" y se sumaban a los gastos operativos.
-  if (/amortizaci[óo]n\s+de\s+capital|cuota\s+nro|pr[ée]stamo|loan\s+payment/i.test(nota)) return 'préstamo';
+  if (/amortizaci[óo]n\s+de\s+capital|cuota\s+nro|pr[ée]stamo|loan\s+paym/i.test(nota)) return 'préstamo';
   if (/limpieza|lavander[íi]a\b/i.test(nota)) return 'limpieza';
   if (/condominio|gas\b|luz|agua|el[ée]ctric|internet|wifi|cable|servicio de/i.test(nota)) return 'servicios';
   if (/suministro|reemplazo|repuesto|compra|lavadora|secadora|nevera|a\.?\s?c\.?|aire|equipo/i.test(nota)) return 'repuestos';
@@ -770,7 +770,10 @@ const guessExpCategory = (nota) => {
 // Solo la depreciación se excluye (asiento contable, no hay salida de efectivo).
 // Las cuotas del préstamo SÍ entran: son salida real de caja (categoría "préstamo").
 const isNonOperating = (nota) => /depreciaci[óo]n/i.test(nota||'');
-const isLoanPayment = (nota) => /amortizaci[óo]n\s+de\s+capital/i.test(nota||'');
+// Una cuota del préstamo no tiene factura que ya la haya contado, así que aunque el
+// reporte la registre como Cheque se importa marcada. El banco corta el texto a
+// 32 caracteres ("LOAN PAYMEN"), por eso se busca "loan paym".
+const isLoanPayment = (nota) => /amortizaci[óo]n\s+de\s+capital|loan\s+paym/i.test(nota||'');
 
 const QB_UNIT_IDS = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20];
 const qbDetectUnits = (txt) => {
