@@ -2645,15 +2645,18 @@ function UnitsScreen() {
 
     // Los bloqueos (propietario / Bocobay) no generan ingresos: fuera del informe
     const resAll = reservations.filter(r=>!r.isOwner && rentable.includes(r.unitId));
-    if (resAll.length===0) { alert('There are no reservations on record.'); return; }
+    if (resAll.length===0) { alert('No hay reservas registradas.'); return; }
 
     // Diálogos síncronos primero: conservan el gesto del clic
-    let conGastos = confirm('Include EXPENSES in the report?\n\nCovers all units and common areas.\nOK = revenue, expenses and net income\nCancel = revenue only');
+    let conGastos = confirm('¿Incluir los GASTOS en el informe?\n\nAbarca todas las unidades y las áreas comunes.\nAceptar = ingresos, gastos e ingreso operativo neto\nCancelar = solo ingresos');
+    // El préstamo es un costo financiero: no se mezcla con los gastos operativos y
+    // por defecto NO se muestra, porque este informe suele ir a compradores o inversores.
+    const conDeuda = conGastos && confirm('¿Mostrar también las CUOTAS DEL PRÉSTAMO y el flujo de caja después de pagarlas?\n\nSolo para uso tuyo, de un socio o del banco.\nNO lo incluyas si el informe es para un comprador o inversor.\n\nAceptar = incluir el servicio de la deuda\nCancelar = solo cifras operativas');
 
     // Abrir la ventana ANTES de cualquier await, o el navegador la bloquea
     const w = window.open('','_blank');
-    if (!w) { alert('Your browser blocked the pop-up. Allow pop-ups for this site and try again.'); return; }
-    w.document.write('<html><body style="font-family:Georgia,serif;background:#fdf8f0;color:#8b7355;padding:40px;text-align:center">Generating report\u2026</body></html>');
+    if (!w) { alert('El navegador bloqueó la ventana emergente. Permitila para este sitio e intentá de nuevo.'); return; }
+    w.document.write('<html><body style="font-family:Georgia,serif;background:#fdf8f0;color:#8b7355;padding:40px;text-align:center">Generando informe\u2026</body></html>');
 
     let exp = [];
     if (conGastos) {
@@ -2669,7 +2672,7 @@ function UnitsScreen() {
       } catch(e) {
         // Un informe sin gastos que parece tenerlos en cero engaña: se avisa.
         conGastos = false;
-        alert('The expenses could not be loaded. The report will be generated with revenue only.');
+        alert('No se pudieron cargar los gastos. El informe se genera solo con ingresos.');
       }
     }
 
@@ -2716,10 +2719,15 @@ function UnitsScreen() {
     const condoOf = y => condoMonths(y) * CONDO_MONTHLY * rentable.length;
     // El capital del préstamo no es gasto operativo; el condominio se calcula aparte
     const expOp = exp.filter(e=>e.category!=='préstamo' && !/condominio|condominium/i.test(e.concept||''));
+    // Cuotas del préstamo: costo financiero, aparte de lo operativo
+    const prestamos = (conGastos && conDeuda) ? exp.filter(e=>e.category==='préstamo') : [];
+    const yearOf = x => parseInt(x.date.slice(0,4));
+    const deudaY = y => prestamos.filter(e=>yearOf(e)===y).reduce((s,e)=>s+e.amount,0);
 
     const incYears = [...new Set(resAll.map(r=>r.checkOut.getFullYear()))];
     const expYears = [...new Set(expOp.map(x=>parseInt(x.date.slice(0,4))))];
-    const years = [...new Set([...incYears, ...(conGastos?expYears:[])])].sort();
+    const deudaYears = [...new Set(prestamos.map(yearOf))];
+    const years = [...new Set([...incYears, ...(conGastos?expYears:[]), ...deudaYears])].sort();
     // Un año que solo tiene reservas futuras no tiene gastos que mostrar: la columna sería puro cero
     const yearsGasto = years.filter(y=>y<=yNow);
 
@@ -2908,9 +2916,17 @@ function UnitsScreen() {
             <td style="padding:6px 10px;font-size:10px;color:#8b7355">Expense ratio</td>
             ${yearsGasto.map(y=>{const t=yearTotal(y);return `<td style="padding:6px 10px;text-align:right;font-size:11px;color:#5a4a35">${t?((yearExp(y)/t)*100).toFixed(0)+'%':'\u2014'}</td>`;}).join('')}
           </tr>
+          ${prestamos.length?`<tr style="border-top:2px solid #8b7355;background:#faf6ee">
+            <td style="padding:9px 10px;font-size:10px;font-weight:800;color:#8b7355;letter-spacing:.5px">DEBT SERVICE (LOAN PAYMENTS)</td>
+            ${yearsGasto.map(y=>{const d=deudaY(y);return `<td style="padding:9px 10px;text-align:right;font-size:12px;font-weight:700;color:${d?'#9c3030':'#d5cdbb'}">${d?'('+money(d).slice(1)+')':'\u2014'}</td>`;}).join('')}
+          </tr>
+          <tr style="border-top:2px solid #2d6e4e;background:#f2f8f4">
+            <td style="padding:11px 10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">CASH FLOW AFTER DEBT SERVICE</td>
+            ${yearsGasto.map(y=>{const n=yearTotal(y)-yearExp(y)-deudaY(y);return `<td style="padding:11px 10px;text-align:right;font-size:15px;font-weight:800;color:${n>=0?'#2d6e4e':'#9c3030'}">${n<0?'('+money(-n).slice(1)+')':money(n)}</td>`;}).join('')}
+          </tr>`:''}
         </tbody>
       </table>
-      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit across ${rentable.length} units, accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment) and include costs booked to common areas. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).</div></div>`;
+      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit across ${rentable.length} units, accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment) and include costs booked to common areas. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).${prestamos.length?' Debt service is a financing cost, not an operating cost, so it is shown below net operating income; it comprises the loan installments recorded in the accounting system.':''}</div></div>`;
 
     const logoUrl = `${window.location.origin}/customcolor_text-logoname_transparent_background.png`;
     const rango = years.length ? ` \u00b7 ${years[0]}\u2013${years[years.length-1]}` : '';
