@@ -130,7 +130,8 @@ function AuthProvider({ children }) {
           hostawayId: r.hostaway_id,
           reservationId: r.reservation_id || '',
           isOwner:   r.is_owner === true,
-        })));
+        // Lo posterior a la venta es del nuevo propietario (ej. un bloqueo a futuro en PAS 17)
+        })).filter(r => unidadActivaEn(r.unitId, r.checkIn)));
       }
     } catch(e) { console.log('Reservations fetch failed', e); }
   }, [token]);
@@ -381,6 +382,29 @@ function AuthProvider({ children }) {
 /* CONSTANTS */
 const UNIT_IDS  = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20,100,101];
 
+// ── Unidades vendidas ─────────────────────────────────────────────────────
+// Una unidad vendida es tuya hasta el último día indicado (inclusive). Desde el día
+// siguiente es del nuevo propietario y deja de contar: ocupación, calendario, recordatorios,
+// condominio e informes. Su historia hasta esa fecha se conserva.
+// Para registrar otra venta basta con agregar una línea acá.
+const UNIDADES_VENDIDAS = { 17: '2026-08-31' };
+const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+// ¿La unidad es tuya en esa fecha? (fecha: Date o 'YYYY-MM-DD')
+const unidadActivaEn = (uid, fecha) => {
+  const v = UNIDADES_VENDIDAS[uid]; if (!v) return true;
+  return (typeof fecha==='string' ? fecha.slice(0,10) : isoLocal(fecha)) <= v;
+};
+const vendidaHoy = uid => !unidadActivaEn(uid, new Date());
+const unameV = id => uname(id) + (vendidaHoy(id) ? ' (vendida)' : '');
+// Días de ese mes (y, m = 0-11) en que la unidad fue tuya
+const diasActivosMes = (uid, y, m) => {
+  const dim = new Date(y, m+1, 0).getDate(); const v = UNIDADES_VENDIDAS[uid]; if (!v) return dim;
+  let n = 0; for (let d=1; d<=dim; d++) if (isoLocal(new Date(y,m,d)) <= v) n++;
+  return n;
+};
+const fechaLarga = iso => { const [y,m,d]=String(iso).slice(0,10).split('-').map(Number);
+  return `${d} de ${['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'][m-1]} de ${y}`; };
+
 // Hostaway ID → unit IDs mapping
 const HOSTAWAY_MAP = {
   'portaalsole1':    [1],
@@ -444,7 +468,7 @@ function parseHostawayWithStats(csvText) {
   const headers = lines[0].replace(/\r/,'').split(',');
   const stats = {
     totalRows: 0, confirmed: 0, cancelled: 0,
-    ownerBlocks: 0, skippedOther: 0, skippedUnknownUnit: 0, skippedBadDate: 0,
+    ownerBlocks: 0, skippedOther: 0, skippedUnknownUnit: 0, skippedBadDate: 0, skippedSold: 0,
     unknownUnits: new Set(),
   };
   for (let i=1; i<lines.length; i++) {
@@ -459,6 +483,10 @@ function parseHostawayWithStats(csvText) {
     if (!unidadesDeListado(hostawayId)) { stats.skippedUnknownUnit++; stats.unknownUnits.add(hostawayId); continue; }
     const dateParts = (row.display_dates||'').split(' - ');
     if (dateParts.length !== 2) { stats.skippedBadDate++; continue; }
+    // Reservas de una unidad ya vendida, posteriores a la venta: no se importan
+    { const s0 = dateParts[0].trim(); const ini = /\d{4}/.test(s0) ? new Date(s0) : new Date(s0+' '+new Date().getFullYear());
+      const ul = unidadesDeListado(hostawayId) || [];
+      if (!isNaN(ini) && ul.length && ul.every(u=>!unidadActivaEn(u, ini))) { stats.skippedSold++; continue; } }
     if (row.status === 'confirmed') stats.confirmed++;
     else if (row.status === 'cancelled') stats.cancelled++;
   }
@@ -526,6 +554,8 @@ function parseHostawayCSVWithStatus(csvText, filterStatus) {
       : rawIncome;
 
     unitIds.forEach(uid => {
+      // Unidad vendida: lo posterior a la venta es del nuevo propietario
+      if (!unidadActivaEn(uid, checkIn)) return;
       reservations.push({
         unitId:   uid,
         guest:    row.name,
@@ -855,7 +885,7 @@ const parseQuickBooksCSV = (csvText) => {
       if (isNonOperating(desc)) continue;
       let units = qbDetectUnits(desc);
       // Pago de condominio en un solo monto (sin unidad): repartir entre las 16 unidades
-      if (units.length===0 && /condominio/i.test(vendor+' '+desc)) units = [...QB_UNIT_IDS];
+      if (units.length===0 && /condominio/i.test(vendor+' '+desc)) units = QB_UNIT_IDS.filter(id=>unidadActivaEn(id, `${dateM[3]}-${dateM[2]}-${dateM[1]}`));
       rows.push({
         date: `${dateM[3]}-${dateM[2]}-${dateM[1]}`,
         vendor, tipo: 'Pago',
@@ -1301,7 +1331,7 @@ function NewTaskModal({ onClose, onSaved, defaultUnitId, fotoInicial }) {
 
         <div className="msec"><span className="mlbl">Unidad</span>
           <select className="minp msel" value={f.unitId} onChange={e=>s('unitId',e.target.value)}>
-            {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+            {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
           </select></div>
         <div className="msec"><span className="mlbl">Nivel</span>
           <div className="cgrid">{['N1','N2','N3'].map(l=><button key={l} className={`cchip ${f.level===l?'csel':''}`} onClick={()=>s('level',l)}>{l}</button>)}</div></div>
@@ -1981,7 +2011,7 @@ ${taskBlocks||'<p style="color:#8b7355;font-style:italic">No hay tareas registra
             };
             // Unidades sin actividad reciente (>60 días sin ninguna tarea)
             const UMBRAL = 60;
-            const inactivas = UNIT_IDS.map(uid=>{
+            const inactivas = UNIT_IDS.filter(u=>!vendidaHoy(u)).map(uid=>{
               const ts = tasks.filter(t=>t.unitId===uid);
               if (ts.length===0) return { uid, dias:null };
               const last = ts.map(lastActivity).sort();
@@ -2350,10 +2380,12 @@ function UnitsScreen() {
     return 'ok';
   };
 
-  const filteredUnits = search.trim()
+  const unidadesBuscadas = search.trim()
     ? UNIT_IDS.filter(uid => uname(uid).toLowerCase().includes(search.toLowerCase()) ||
         tasks.some(t=>t.unitId===uid&&(t.title||'').toLowerCase().includes(search.toLowerCase())))
     : UNIT_IDS;
+  // Las unidades vendidas van al final de la lista
+  const filteredUnits = [...unidadesBuscadas.filter(u=>!vendidaHoy(u)), ...unidadesBuscadas.filter(u=>vendidaHoy(u))];
 
   const unitActive = tasks.filter(t=>t.unitId===selU&&t.status!=='completado'&&(lvl==='all'||t.level===lvl));
   const unitDone   = tasks.filter(t=>t.unitId===selU&&t.status==='completado'&&(lvl==='all'||t.level===lvl));
@@ -2432,7 +2464,10 @@ function UnitsScreen() {
     const condoMonths = y => {
       if (y < CONDO_START_Y || y > today.getFullYear()) return 0;
       const first = (y===CONDO_START_Y) ? CONDO_START_M : 0;
-      const last  = (y===today.getFullYear()) ? today.getMonth() : 11;
+      let last  = (y===today.getFullYear()) ? today.getMonth() : 11;
+      // Unidad vendida: el condominio termina con el mes de la venta (el siguiente lo paga el nuevo dueño)
+      const vend = UNIDADES_VENDIDAS[selU];
+      if (vend) { const vy = +vend.slice(0,4), vm = +vend.slice(5,7)-1; if (y>vy) return 0; if (y===vy) last = Math.min(last, vm); }
       return Math.max(0, last - first + 1);
     };
     const condoOf = y => condoMonths(y) * CONDO_MONTHLY;
@@ -2469,7 +2504,12 @@ function UnitsScreen() {
 
     // Occupancy: nights sold / days elapsed in that year (full year for past years)
     const daysInYear = y => ((y%4===0&&y%100!==0)||y%400===0) ? 366 : 365;
+    const vendFin = UNIDADES_VENDIDAS[selU] ? new Date(UNIDADES_VENDIDAS[selU]+'T00:00:00') : null;
     const daysElapsed = y => {
+      if (vendFin) {   // unidad vendida: los días cuentan hasta la venta
+        if (y > vendFin.getFullYear()) return 0;
+        if (y === vendFin.getFullYear()) return Math.round((vendFin - new Date(y,0,1))/86400000) + 1;
+      }
       if (y < today.getFullYear()) return daysInYear(y);
       if (y > today.getFullYear()) return 0;
       return Math.round((today - new Date(y,0,1))/86400000) + 1;
@@ -2494,6 +2534,7 @@ function UnitsScreen() {
     const subLbl = txt => `<br/><span style="font-size:7.5px;font-weight:400;letter-spacing:.3px;color:#a99a80;text-transform:none">${txt}</span>`;
     const yearLabel = y => {
       if (y > today.getFullYear()) return `${y}${subLbl('Booked')}`;
+      if (vendFin && y === vendFin.getFullYear()) return `${y}${subLbl(`Jan\u2013${MONTHS[vendFin.getMonth()]} \u00b7 until sale`)}`;
       if (y === today.getFullYear()) return `${y}${subLbl(`YTD \u00b7 Jan\u2013${MONTHS[today.getMonth()]}`)}`;
       if (y === CONDO_START_Y) return `${y}${subLbl(`${MONTHS[CONDO_START_M]}\u2013Dec \u00b7 partial`)}`;
       return `${y}${subLbl('Full year')}`;
@@ -2633,18 +2674,20 @@ function UnitsScreen() {
     </div>
 
     <h1>${name} \u2014 Revenue &amp; Occupancy Report</h1>
-    <div class="sub">Short-term rental performance${years.length?` \u00b7 ${years[0]}\u2013${years[years.length-1]}`:''}</div>
+    <div class="sub">Short-term rental performance${years.length?` \u00b7 ${years[0]}\u2013${years[years.length-1]}`:''}${vendFin?` \u00b7 Sold ${vendFin.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}`:''}</div>
 
     <div class="banner">
       <strong>NET REVENUE TO OWNER.</strong> All revenue figures in this report are stated <strong>after</strong> sales tax,
       channel fees and the Bocobay management fee have been deducted. Amounts represent the net proceeds actually
       remitted to the owner, not gross booking value. All figures in USD.
-      <br/><strong>${yNow} figures are year-to-date</strong> (January through ${new Date().toLocaleDateString('en-US',{month:'long'})} ${yNow}) and do not represent a full year of operation.
+      ${vendFin
+        ? `<br/><strong>This unit was sold on ${vendFin.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}.</strong> The figures cover the period of ownership only; later months belong to the new owner.`
+        : `<br/><strong>${yNow} figures are year-to-date</strong> (January through ${new Date().toLocaleDateString('en-US',{month:'long'})} ${yNow}) and do not represent a full year of operation.`}
     </div>
 
     <div class="stats">
-      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Realized net revenue ${yNow} YTD</div></div>
-      <div class="stat"><div class="stat-n">${occNow?occNow.toFixed(0)+'%':'\u2014'}</div><div class="stat-l">Occupancy ${yNow} YTD</div></div>
+      <div class="stat"><div class="stat-n">${money(totNow)}</div><div class="stat-l">Realized net revenue ${yNow} ${vendFin?'until sale':'YTD'}</div></div>
+      <div class="stat"><div class="stat-n">${occNow?occNow.toFixed(0)+'%':'\u2014'}</div><div class="stat-l">Occupancy ${yNow} ${vendFin?'until sale':'YTD'}</div></div>
       <div class="stat"><div class="stat-n">${adr?money(adr):'\u2014'}</div><div class="stat-l">Average daily rate</div></div>
       <div class="stat"><div class="stat-n">${money(futTotal)}</div><div class="stat-l">Confirmed forward bookings</div></div>
     </div>
@@ -2752,7 +2795,14 @@ function UnitsScreen() {
       const last  = (y===yNow) ? today.getMonth() : 11;
       return Math.max(0, last - first + 1);
     };
-    const condoOf = y => condoMonths(y) * CONDO_MONTHLY * rentable.length;
+    // Cada unidad paga hasta el mes de su venta (el siguiente lo paga el nuevo dueño)
+    const condoMonthsU = (u, y) => {
+      const n = condoMonths(y); const v = UNIDADES_VENDIDAS[u]; if (!v || n===0) return n;
+      const vy = +v.slice(0,4), vm = +v.slice(5,7)-1; if (y>vy) return 0; if (y<vy) return n;
+      const first = (y===CONDO_START_Y) ? CONDO_START_M : 0;
+      return Math.max(0, Math.min(vm, (y===yNow) ? today.getMonth() : 11) - first + 1);
+    };
+    const condoOf = y => rentable.reduce((s,u)=>s+condoMonthsU(u,y),0) * CONDO_MONTHLY;
     // El capital del préstamo no es gasto operativo; el condominio se calcula aparte
     const expOp = exp.filter(e=>e.category!=='préstamo' && !esNoOperativa(e) && !esCondoHOA(e));
     // Cuotas del préstamo: costo financiero, aparte de lo operativo
@@ -2785,7 +2835,9 @@ function UnitsScreen() {
       const f = primero[u]; if (!f) return 0;
       const ene = new Date(y,0,1);
       const ini = ene > f ? ene : f;
-      const fin = y < yNow ? new Date(y,11,31) : (y === yNow ? today : null);
+      let fin = y < yNow ? new Date(y,11,31) : (y === yNow ? today : null);
+      const vend = UNIDADES_VENDIDAS[u];   // una unidad vendida cuenta hasta el día de la venta
+      if (vend && fin) { const vf = new Date(vend+'T00:00:00'); if (vf < fin) fin = vf; }
       if (!fin || fin < ini) return 0;
       return Math.round((fin - ini)/86400000) + 1;
     };
@@ -2907,7 +2959,7 @@ function UnitsScreen() {
           </tr>
         </tbody>
       </table>
-      <div class="note">Units are ranked by ${yNow} year-to-date net revenue. ${yNow-1} is shown for the full year, so it is not directly comparable to the year-to-date column.</div>`;
+      <div class="note">Units are ranked by ${yNow} year-to-date net revenue. ${yNow-1} is shown for the full year, so it is not directly comparable to the year-to-date column.${Object.entries(UNIDADES_VENDIDAS).filter(([u])=>filas.some(f=>f.u===+u)).map(([u,f])=>` ${uname(+u)} was sold on ${new Date(f+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}; its figures cover the period of ownership only.`).join('')}</div>`;
 
     const futureTable = fwdKeys.length===0
       ? '<div class="note" style="font-size:12px">No forward bookings on record.</div>'
@@ -2974,7 +3026,7 @@ function UnitsScreen() {
           </tr>`:''}
         </tbody>
       </table>
-      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit across ${rentable.length} units, accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment) and include costs booked to common areas. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).${prestamos.length?' Debt service is a financing cost, not an operating cost, so it is shown below net operating income; it comprises the loan installments recorded in the accounting system.':''}${noOp.length?' Non-operating items (construction and equipment, payments between related companies, costs of selling a unit) are shown below cash flow after debt service and are not part of operating income.':''}</div></div>`;
+      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit for each month the unit was owned (${rentable.length} units in total), accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment) and include costs booked to common areas. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).${prestamos.length?' Debt service is a financing cost, not an operating cost, so it is shown below net operating income; it comprises the loan installments recorded in the accounting system.':''}${noOp.length?' Non-operating items (construction and equipment, payments between related companies, costs of selling a unit) are shown below cash flow after debt service and are not part of operating income.':''}</div></div>`;
 
     const logoUrl = `${window.location.origin}/customcolor_text-logoname_transparent_background.png`;
     const rango = years.length ? ` \u00b7 ${years[0]}\u2013${years[years.length-1]}` : '';
@@ -3120,7 +3172,7 @@ function UnitsScreen() {
     <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
       <div className="header">
         <div className="header-title">Unidades</div>
-        <div style={{fontSize:11,color:'rgba(255,255,255,.32)'}}>{UNIT_IDS.length} unidades</div>
+        <div style={{fontSize:11,color:'rgba(255,255,255,.32)'}}>{UNIT_IDS.filter(id=>!vendidaHoy(id)).length} unidades</div>
       </div>
       <div className="ulayout">
 
@@ -3154,7 +3206,7 @@ function UnitsScreen() {
               return (
                 <div key={uid} onClick={()=>{setSelU(uid);setShowDone(false);setUTab('tasks');}}
                   className={`utile ${selU===uid?'usel':''}`}
-                  style={{position:'relative',borderLeft:`2.5px solid ${selU===uid?'var(--gold)':'transparent'}`}}>
+                  style={{position:'relative',opacity:vendidaHoy(uid)?.5:1,borderLeft:`2.5px solid ${selU===uid?'var(--gold)':'transparent'}`}}>
                   {/* Alert dot */}
                   <div style={{position:'absolute',top:8,right:8,width:7,height:7,borderRadius:'50%',background:alertColor[alert]}}/>
                   {SPECIAL[uid]
@@ -3169,6 +3221,7 @@ function UnitsScreen() {
                   )}
                   {pend.length>0&&<div style={{fontSize:8,color:'var(--muted)',marginTop:2}}>{pend.length} tarea{pend.length!==1?'s':''}</div>}
                   {(()=>{
+                    if(vendidaHoy(uid)) return <div style={{fontSize:7,color:'var(--muted)',fontWeight:800,marginTop:1}}>VENDIDA</div>;
                     const now=new Date();
                     const occ=reservations.some(r=>r.unitId===uid&&r.checkIn<=now&&r.checkOut>=now);
                     const soon=!occ&&reservations.some(r=>r.unitId===uid&&r.checkIn>now&&Math.ceil((r.checkIn-now)/(1000*60*60*24))<=3);
@@ -3220,7 +3273,7 @@ function UnitsScreen() {
               return c.filter(w=>!GENERICAS.has(w)).length>=1 || c.length>=2;
             };
             const reincPorUnidad = {};
-            UNIT_IDS.forEach(uid=>{
+            UNIT_IDS.filter(u=>!vendidaHoy(u)).forEach(uid=>{
               const ut = tasks.filter(t=>t.unitId===uid);
               const cats = [...new Set(ut.map(t=>t.category||'otro'))];
               const ya = new Set(); let n = 0; let ultima = null;
@@ -3253,7 +3306,7 @@ function UnitsScreen() {
             const maxCat = Math.max(1,...catList.map(([,v])=>v.n));
 
             // Estado por unidad: carga activa y última actividad
-            const porUnidad = UNIT_IDS.map(uid=>{
+            const porUnidad = UNIT_IDS.filter(u=>!vendidaHoy(u)).map(uid=>{
               const ut = tasks.filter(t=>t.unitId===uid);
               const act = ut.filter(t=>t.status!=='completado');
               const fechas = ut.map(t=>ms(t.status==='completado'?doneDate(t):t.createdAt)).filter(Boolean);
@@ -3278,7 +3331,7 @@ function UnitsScreen() {
                     <div style={{minWidth:0}}>
                       <div style={{fontFamily:'var(--serif)',fontSize:20,fontWeight:700,color:'#fff',lineHeight:1.1}}>Resumen general</div>
                       <div style={{fontSize:11,color:'rgba(255,255,255,.4)',marginTop:2}}>
-                        {UNIT_IDS.length} unidades · {tasks.length} tareas registradas
+                        {UNIT_IDS.filter(id=>!vendidaHoy(id)).length} unidades · {tasks.length} tareas registradas
                       </div>
                     </div>
                     {isAdmin&&<button onClick={exportPortfolioIncomePDF} title="Informe de ingresos de toda la propiedad"
@@ -3416,7 +3469,12 @@ function UnitsScreen() {
                   {unitActive.length>0?`${unitActive.length} tarea${unitActive.length!==1?'s':''} activa${unitActive.length!==1?'s':''}`:'Sin tareas activas'}
                   {unitDone.length>0&&` · ${unitDone.length} completada${unitDone.length!==1?'s':''}`}
                 </div>
-                {reservations.length>0&&(()=>{
+                {vendidaHoy(selU)&&(
+                  <div style={{marginTop:6,fontSize:11,fontWeight:700,color:'var(--gold)',background:'rgba(201,150,58,.12)',border:'1px solid rgba(201,150,58,.3)',borderRadius:8,padding:'6px 10px',lineHeight:1.4}}>
+                    🏷️ Vendida el {fechaLarga(UNIDADES_VENDIDAS[selU])}. Desde esa fecha es del nuevo propietario; se conserva el historial hasta entonces.
+                  </div>
+                )}
+                {reservations.length>0&&!vendidaHoy(selU)&&(()=>{
                   const now=new Date();
                   const mStart=new Date(now.getFullYear(),now.getMonth(),1);
                   const mEnd=new Date(now.getFullYear(),now.getMonth()+1,0);
@@ -3443,13 +3501,13 @@ function UnitsScreen() {
               <div style={{display:'flex',gap:6}}>
                 {isAdmin&&<button onClick={exportUnitIncomePDF} title="Informe de ingresos para venta/inversores" style={{background:'rgba(45,110,78,.12)',color:'var(--done)',border:'1px solid rgba(45,110,78,.3)',borderRadius:8,padding:'7px 10px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>💰 PDF</button>}
                 {isAdmin&&<button onClick={exportUnitPDF} style={{background:'rgba(201,150,58,.15)',color:'var(--gold)',border:'1px solid rgba(201,150,58,.3)',borderRadius:8,padding:'7px 10px',fontSize:10,fontWeight:800,cursor:'pointer',flexShrink:0}}>PDF</button>}
-                <button onClick={()=>setShowNew(true)} style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'7px 11px',fontSize:11,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
+                {!vendidaHoy(selU)&&<button onClick={()=>setShowNew(true)} style={{background:'var(--gold)',color:'#1a1208',border:'none',borderRadius:8,padding:'7px 11px',fontSize:11,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
                   <span style={{fontSize:14,lineHeight:1}}>+</span> Tarea
-                </button>
+                </button>}
               </div>
             </div>
             {/* Accesos: siempre a la vista, es el dato que se busca en el momento */}
-            {accesos!==false&&(()=>{
+            {accesos!==false&&!vendidaHoy(selU)&&(()=>{
               const a = accesoDe(selU);
               const copiar = (txt,lbl) => {
                 if (!txt) return;
@@ -4319,7 +4377,7 @@ function RecordsScreen() {
   const [scanResults, setScanResults] = useState([]);
   const [showCompare, setShowCompare] = useState(false);
   const [selMeas, setSelMeas] = useState(null); // medición seleccionada para ver/editar
-  const scanUnits = UNIT_IDS.filter(id=>id!==100&&id!==101);
+  const scanUnits = UNIT_IDS.filter(id=>id!==100&&id!==101&&!vendidaHoy(id));
 
   // ── ISO week helpers ──────────────────────────────────────────
   const getISOWeek = (offsetWeeks) => {
@@ -5287,7 +5345,7 @@ function RecordsScreen() {
               </div></div>
             <div className="msec"><span className="mlbl">Unidad</span>
               <select className="minp msel" value={nm.unitId} onChange={e=>setNm(p=>({...p,unitId:e.target.value}))}>
-                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
               </select></div>
             <div className="msec">
               <span className="mlbl">
@@ -5380,7 +5438,7 @@ function RecordsScreen() {
               <select className="minp msel" value={ueUnit} disabled={!!ueBusy}
                 onChange={e=>{ setUeUnit(Number(e.target.value)); setUeVals({}); }}
                 style={{marginBottom:10}}>
-                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
               </select>
 
               <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:5}} className="hide-scroll">
@@ -5650,7 +5708,7 @@ function DashboardScreen({ onNavigate }) {
   const [verifOpenDay, setVerifOpenDay] = useState({});
 
   // ── Occupancy calculations ────────────────────────────────────
-  const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101); // exclude Recepcion/Areas Comunes
+  const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101&&!vendidaHoy(id)); // sin Recepcion/Areas Comunes ni unidades vendidas
   const occupiedNow   = rentableUnits.filter(uid=>reservations.some(r=>r.unitId===uid&&r.checkIn<=now&&r.checkOut>=now));
   const checkinsToday = reservations.filter(r=>r.checkIn.toDateString()===now.toDateString());
   const checkoutsToday= reservations.filter(r=>r.checkOut.toDateString()===now.toDateString());
@@ -5680,7 +5738,7 @@ function DashboardScreen({ onNavigate }) {
   // Solo considera unidades que ya tienen historial de agua (se autoadapta
   // si alguna unidad deja de medirse o se agrega una nueva).
   const semanaActual = isoWeekOf(now);
-  const aguaTracked  = [...new Set((measurements||[]).filter(m=>m.type==='agua').map(m=>m.unitId))];
+  const aguaTracked  = [...new Set((measurements||[]).filter(m=>m.type==='agua').map(m=>m.unitId))].filter(uid=>!vendidaHoy(uid));
   const aguaMissing  = aguaTracked.filter(uid =>
     !(measurements||[]).some(m=>m.type==='agua' && m.week===semanaActual && m.unitId===uid)
   ).sort((a,b)=>a-b);
@@ -5776,7 +5834,7 @@ function DashboardScreen({ onNavigate }) {
     .slice(0,6);
 
   // Tasks per unit (top 5)
-  const unitCounts = UNIT_IDS.map(uid=>({
+  const unitCounts = UNIT_IDS.filter(uid=>!vendidaHoy(uid)).map(uid=>({
     uid, count: tasks.filter(t=>t.unitId===uid&&t.status!=='completado').length
   })).filter(u=>u.count>0).sort((a,b)=>b.count-a.count).slice(0,5);
   const maxCount = unitCounts[0]?.count || 1;
@@ -6198,7 +6256,8 @@ function ReservationsScreen() {
   // que el archivo venía recortado.
   const [quitarSel, setQuitarSel] = useState({});
   const [quitarBusy, setQuitarBusy] = useState(false);
-  const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101);
+  const rentableUnits = UNIT_IDS.filter(id=>id!==100&&id!==101);   // histórico: incluye las vendidas
+  const rentableActivas = rentableUnits.filter(uid=>!vendidaHoy(uid)); // las que son tuyas hoy
   const MONTHS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
   const MONTHS_FULL = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
@@ -6213,7 +6272,7 @@ function ReservationsScreen() {
   const fmtShort = iso => { const [y,m,d]=iso.split('-').map(Number); const MM=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']; return `${d} ${MM[m-1]}`; };
 
   // Occupied units right now
-  const occupiedNow = rentableUnits.filter(uid=>
+  const occupiedNow = rentableActivas.filter(uid=>
     reservations.some(r=>r.unitId===uid&&r.checkIn<=now&&r.checkOut>=now)
   );
 
@@ -6228,8 +6287,9 @@ function ReservationsScreen() {
       const e = r.checkOut > mEnd  ? mEnd   : r.checkOut;
       if (s < e) occ += (e-s)/(1000*60*60*24);
     });
-    const divisor = uid==='all' ? days*rentableUnits.length : days;
-    return Math.min(100, Math.round(occ/divisor*100));
+    // Se divide por los días en que cada unidad fue tuya: una unidad vendida deja de contar desde la venta
+    const divisor = uid==='all' ? rentableUnits.reduce((s,u)=>s+diasActivosMes(u,year,month),0) : diasActivosMes(uid,year,month);
+    return divisor>0 ? Math.min(100, Math.round(occ/divisor*100)) : 0;
   };
 
   // Monthly data for selected year
@@ -6302,7 +6362,7 @@ function ReservationsScreen() {
                     cancelled:a.cancelled+b.cancelled, ownerBlocks:a.ownerBlocks+b.ownerBlocks,
                     skippedOther:a.skippedOther+b.skippedOther,
                     skippedUnknownUnit:a.skippedUnknownUnit+b.skippedUnknownUnit,
-                    skippedBadDate:a.skippedBadDate+b.skippedBadDate,
+                    skippedBadDate:a.skippedBadDate+b.skippedBadDate, skippedSold:(a.skippedSold||0)+(b.skippedSold||0),
                     unknownUnits:[...new Set([...a.unknownUnits,...b.unknownUnits])],
                   }));
 
@@ -6453,7 +6513,7 @@ function ReservationsScreen() {
         </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,padding:'10px 16px 14px'}}>
           {[
-            {n:occupiedNow.length+'/'+rentableUnits.length, l:'Ocupadas', c:'var(--urgent)'},
+            {n:occupiedNow.length+'/'+rentableActivas.length, l:'Ocupadas', c:'var(--urgent)'},
             {n:getMonthOcc('all',now.getFullYear(),now.getMonth())+'%', l:'Este mes', c:'var(--gold)'},
             {n:reservations.filter(r=>r.checkIn>=new Date(now.getFullYear(),0,1)).length, l:''+now.getFullYear(), c:'var(--gold2)'},
             {n:thisWeek.length, l:'Sem. actual', c:'var(--done)'},
@@ -6515,7 +6575,7 @@ function ReservationsScreen() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rentableUnits.map((uid,ri)=>(
+                      {rentableUnits.filter(uid=>diasActivosMes(uid,calYear,calMonth)>0).map((uid,ri)=>(
                         <tr key={uid}>
                           <td style={{padding:'2px 8px',fontWeight:800,fontSize:9,color:'var(--gold)',position:'sticky',left:0,background:'var(--surface)',zIndex:1,whiteSpace:'nowrap',letterSpacing:.2}}>{uname(uid)}</td>
                           {days.map(d=>{
@@ -6666,7 +6726,8 @@ function ReservationsScreen() {
                           if (s < e) occDays += (e-s)/(1000*60*60*24);
                         });
                       });
-                      const occRate = Math.round(occDays / (rentableUnits.length * daysInMonth) * 100);
+                      const dispUnidadDias = rentableUnits.reduce((s,u)=>s+diasActivosMes(u,incYear,incMonth),0);
+                      const occRate = dispUnidadDias>0 ? Math.round(occDays / dispUnidadDias * 100) : 0;
                       mejorMesKpi = {l:'Ocupación', v:occRate+'%', c:'var(--done)'};
                     }
 
@@ -6928,7 +6989,7 @@ function ReservationsScreen() {
                           <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',marginBottom:10,display:'flex',flexDirection:'column',gap:8}}>
                             <div style={{display:'flex',gap:8}}>
                               <select className="minp msel" style={{flex:1}} value={expF.unitId} onChange={e=>setExpF(p=>({...p,unitId:e.target.value}))}>
-                                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                                {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
                               </select>
                               <select className="minp msel" style={{flex:1}} value={expF.category} onChange={e=>setExpF(p=>({...p,category:e.target.value}))}>
                                 {EXP_CATS.map(c=><option key={c} value={c}>{EXP_CAT_LABEL[c]||c}</option>)}
@@ -7099,7 +7160,7 @@ function ReservationsScreen() {
                               <div style={{display:'flex',flexDirection:'column',gap:8}}>
                                 <div style={{display:'flex',gap:8}}>
                                   <select className="minp msel" style={{flex:1}} value={editExp.unitId} onChange={e=>setEditExp(p=>({...p,unitId:Number(e.target.value)}))}>
-                                    {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                                    {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
                                   </select>
                                   <select className="minp msel" style={{flex:1}} value={editExp.category} onChange={e=>setEditExp(p=>({...p,category:e.target.value}))}>
                                     {EXP_CATS.map(c=><option key={c} value={c}>{EXP_CAT_LABEL[c]||c}</option>)}
@@ -7261,7 +7322,7 @@ function ReservationsScreen() {
                                           ):(
                                             <select value={r.unit} disabled={qbBusy} onChange={e=>updRow(r,{unit:Number(e.target.value)})}
                                               style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:r.units.length?'var(--gold)':'var(--muted)',maxWidth:110}}>
-                                              {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                                              {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
                                             </select>
                                           )}
                                           <select value={r.category} disabled={qbBusy} onChange={e=>updRow(r,{category:e.target.value})}
@@ -7299,7 +7360,7 @@ function ReservationsScreen() {
                     <select value={priceUnit} onChange={e=>setPriceUnit(e.target.value)}
                       style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:7,padding:'4px 8px',fontSize:11,color:'var(--muted)',outline:'none'}}>
                       <option value="all">Todas</option>
-                      {rentableUnits.map(uid=><option key={uid} value={uid}>{uname(uid)}</option>)}
+                      {rentableUnits.map(uid=><option key={uid} value={uid}>{unameV(uid)}</option>)}
                     </select>
                   </div>
                   {(()=>{
@@ -7581,7 +7642,7 @@ function ReservationsScreen() {
                 <select value={selUnit} onChange={e=>setSelUnit(e.target.value)}
                   style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:7,padding:'4px 8px',fontSize:11,color:'var(--muted)',outline:'none'}}>
                   <option value="all">Todas</option>
-                  {rentableUnits.map(uid=><option key={uid} value={uid}>{uname(uid)}</option>)}
+                  {rentableUnits.map(uid=><option key={uid} value={uid}>{unameV(uid)}</option>)}
                 </select>
               </div>
             </div>
@@ -7967,6 +8028,12 @@ function ReservationsScreen() {
                     <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
                       <span style={{color:'var(--muted)'}}>Bloqueos de Bocobay (descartados)</span>
                       <span style={{color:'var(--muted)'}}>{importResult.stats.skippedOther}</span>
+                    </div>
+                  )}
+                  {importResult.stats.skippedSold>0&&(
+                    <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}}>
+                      <span style={{color:'var(--muted)'}}>Unidades vendidas (ignoradas)</span>
+                      <span style={{color:'var(--muted)'}}>{importResult.stats.skippedSold}</span>
                     </div>
                   )}
                   {importResult.stats.skippedUnknownUnit>0&&(
@@ -9124,7 +9191,7 @@ ${bloques}
                   style={{marginLeft:'auto',background:'var(--surface)',border:'1px solid var(--border)',
                     borderRadius:8,padding:'5px 8px',fontSize:11,color:'var(--muted)',outline:'none'}}>
                   <option value="all">Todas las unidades</option>
-                  {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                  {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
                 </select>
               </div>
 
@@ -9256,7 +9323,7 @@ ${bloques}
               <select className="minp msel" value={form.unitId} disabled={busy}
                 onChange={e=>setForm(p=>({...p,unitId:e.target.value}))}>
                 {(form.kind||'unidad')==='servicio'&&<option value="">General / recepción</option>}
-                {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
+                {UNIT_IDS.map(id=><option key={id} value={id}>{unameV(id)}</option>)}
               </select></div>
 
             <div className="msec"><span className="mlbl">Qué pasó</span>
