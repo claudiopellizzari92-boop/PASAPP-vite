@@ -767,6 +767,33 @@ const guessExpCategory = (nota) => {
   return 'otro';
 };
 
+// ── Gastos que NO son de operar la propiedad ──────────────────────────────
+// Salen del resultado operativo y los informes los muestran aparte. Se guardan en la
+// misma columna "category" (texto libre), así que no hace falta tocar el backend.
+const NO_OPERATIVAS = {
+  construccion:   'Construcción / equipamiento',
+  deuda_empresas: 'Deuda entre empresas',
+  venta:          'Costos de venta',
+};
+const esNoOperativa = (e) => !!NO_OPERATIVAS[e.category];
+// El condominio se calcula con la cuota fija: ni los pagos registrados ni un reintegro
+// marcado "hoa" se suman de nuevo en los informes.
+const esCondoHOA = (e) => e.category==='hoa' || /condominio|condominium/i.test(e.concept||'');
+const EXP_CATS = ['mantenimiento','limpieza','repuestos','servicios','hoa','préstamo','construccion','deuda_empresas','venta','otro'];
+const EXP_CAT_LABEL = { hoa:'condominio (HOA)', construccion:'construcción / equipamiento', deuda_empresas:'deuda entre empresas', venta:'costos de venta' };
+// Clasificación automática al importar de QuickBooks. Es una sugerencia: en la vista previa
+// cada fila tiene su selector de categoría para corregirla.
+const PROV_CONSTRUCCION = /decoci\s+hunter\s+douglas|tbt\s+hunter\s+douglas|pk\s+spaces|the\s+best\s+marble|d\.?\s?f\.?\s+dreischor|elivic\s+enterprises|machinery\s*&\s*energy\s+abc/i;
+const PROV_ENTRE_EMPRESAS = /pelca\s+development|preacero\s+pellizzari/i;
+const guessNoOperativa = (vendor, nota) => {
+  const v = String(vendor||'');
+  // Si la descripción nombra una casa ("closet casa 17") es un arreglo de esa unidad, no obra.
+  if (PROV_CONSTRUCCION.test(v)) return /\b(?:casa|apto|apt\.?|unidad|unit|pas)\s*(?:n\s*[°º*]?\s*)?0?\d{1,2}\b/i.test(nota||'') ? null : 'construccion';
+  if (PROV_ENTRE_EMPRESAS.test(v)) return 'deuda_empresas';
+  if (/venta\s+casa\s+n/i.test(nota||'')) return 'venta';
+  return null;
+};
+
 // Solo la depreciación se excluye (asiento contable, no hay salida de efectivo).
 // Las cuotas del préstamo SÍ entran: son salida real de caja (categoría "préstamo").
 const isNonOperating = (nota) => /depreciaci[óo]n/i.test(nota||'');
@@ -776,9 +803,11 @@ const isNonOperating = (nota) => /depreciaci[óo]n/i.test(nota||'');
 const isLoanPayment = (nota) => /amortizaci[óo]n\s+de\s+capital|loan\s+paym/i.test(nota||'');
 
 const QB_UNIT_IDS = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20];
-const qbDetectUnits = (txt) => {
+const qbDetectUnits = (txt0) => {
   const found = new Set();
   let m;
+  // "Cuota N° 3/12" es el número de cuota de una factura, no la casa 3.
+  const txt = String(txt0||'').replace(/cuota\s*(?:n\s*[°º*]?\s*)?\d+\s*\/\s*\d+/gi, ' ');
   const res = [
     /(?:casa|apto|apt\.?|unidad)\s*(?:n\s*[°º*]?\s*)?0?(\d{1,2})\b/gi,
     /n\s*[°º]\s*0?(\d{1,2})\b/gi,
@@ -837,7 +866,7 @@ const parseQuickBooksCSV = (csvText) => {
         amount: -amt,
         units,
         unit: units[0] || 101,
-        category: guessExpCategory(desc),
+        category: guessNoOperativa(vendor, desc) || guessExpCategory(desc),
         include: true,
       });
     }
@@ -865,7 +894,7 @@ const parseQuickBooksCSV = (csvText) => {
         amount: esPrestamo ? Math.abs(amt) : amt,
         units,
         unit: units[0] || 101,
-        category: guessExpCategory(desc),
+        category: guessNoOperativa(vendor, desc) || guessExpCategory(desc),
         include: true,
         _doc: `${vendor}|${dateM[0]}|${numero}`, // clave de documento para detectar multi-línea
       });
@@ -918,8 +947,9 @@ const parseQuickBooksCSV = (csvText) => {
       amount: Math.abs(amt),
       units,
       unit: units[0] || 101,
-      category: guessExpCategory(nota),
-      include: esGasto,
+      category: guessNoOperativa(vendor, nota) || guessExpCategory(nota),
+      // Un pago entre empresas es un cheque sin factura: se importa marcado, como las cuotas del préstamo
+      include: esGasto || guessNoOperativa(vendor, nota)==='deuda_empresas',
     });
   }
   return rows;
@@ -2374,7 +2404,8 @@ function UnitsScreen() {
         if (r.ok) {
           const rows = await r.json();
           expU = rows.filter(x=>x.unit_id===selU).map(x=>({
-            amount:x.amount, date:String(x.date).slice(0,10),
+            amount:Number(x.amount)||0,   // si llegara como texto, las sumas concatenarían en vez de sumar
+            date:String(x.date).slice(0,10),
             concept:x.concept||'', category:x.category||''
           }));
         }
@@ -2406,7 +2437,7 @@ function UnitsScreen() {
     };
     const condoOf = y => condoMonths(y) * CONDO_MONTHLY;
     // El capital del préstamo no es gasto operativo; el condominio se calcula aparte
-    const expOp = expU.filter(e=>e.category!=='préstamo' && !/condominio|condominium/i.test(e.concept||''));
+    const expOp = expU.filter(e=>e.category!=='préstamo' && !esNoOperativa(e) && !esCondoHOA(e));
 
     // Revenue matrix: month x year (revenue booked to the checkout month)
     const incYears = [...new Set(resU.map(r=>r.checkOut.getFullYear()))];
@@ -2656,7 +2687,7 @@ function UnitsScreen() {
     let conGastos = confirm('¿Incluir los GASTOS en el informe?\n\nAbarca todas las unidades y las áreas comunes.\nAceptar = ingresos, gastos e ingreso operativo neto\nCancelar = solo ingresos');
     // El préstamo es un costo financiero: no se mezcla con los gastos operativos y
     // por defecto NO se muestra, porque este informe suele ir a compradores o inversores.
-    const conDeuda = conGastos && confirm('¿Mostrar también las CUOTAS DEL PRÉSTAMO y el flujo de caja después de pagarlas?\n\nSolo para uso tuyo, de un socio o del banco.\nNO lo incluyas si el informe es para un comprador o inversor.\n\nAceptar = incluir el servicio de la deuda\nCancelar = solo cifras operativas');
+    const conDeuda = conGastos && confirm('¿Mostrar también la DEUDA y las PARTIDAS NO OPERATIVAS?\n\nIncluye las cuotas del préstamo, la construcción, los pagos entre empresas y los costos de venta, con el flujo de caja final.\n\nSolo para uso tuyo, de un socio o del banco.\nNO lo incluyas si el informe es para un comprador o inversor.\n\nAceptar = vista interna completa\nCancelar = solo cifras operativas');
 
     // Abrir la ventana ANTES de cualquier await, o el navegador la bloquea
     const w = window.open('','_blank');
@@ -2723,15 +2754,19 @@ function UnitsScreen() {
     };
     const condoOf = y => condoMonths(y) * CONDO_MONTHLY * rentable.length;
     // El capital del préstamo no es gasto operativo; el condominio se calcula aparte
-    const expOp = exp.filter(e=>e.category!=='préstamo' && !/condominio|condominium/i.test(e.concept||''));
+    const expOp = exp.filter(e=>e.category!=='préstamo' && !esNoOperativa(e) && !esCondoHOA(e));
     // Cuotas del préstamo: costo financiero, aparte de lo operativo
     const prestamos = (conGastos && conDeuda) ? exp.filter(e=>e.category==='préstamo') : [];
+    // Construcción, deuda entre empresas y costos de venta: como el préstamo, solo se muestran
+    // en la vista interna. En el informe para compradores no aparecen en ningún lado.
+    const noOp = (conGastos && conDeuda) ? exp.filter(esNoOperativa) : [];
+    const noOpY = (y, tipo) => noOp.filter(e=>yearOf(e)===y && (!tipo || e.category===tipo)).reduce((s,e)=>s+e.amount,0);
     const yearOf = x => parseInt(x.date.slice(0,4));
     const deudaY = y => prestamos.filter(e=>yearOf(e)===y).reduce((s,e)=>s+e.amount,0);
 
     const incYears = [...new Set(resAll.map(r=>r.checkOut.getFullYear()))];
     const expYears = [...new Set(expOp.map(x=>parseInt(x.date.slice(0,4))))];
-    const deudaYears = [...new Set(prestamos.map(yearOf))];
+    const deudaYears = [...new Set([...prestamos, ...noOp].map(yearOf))];
     const years = [...new Set([...incYears, ...(conGastos?expYears:[]), ...deudaYears])].sort();
     // Un año que solo tiene reservas futuras no tiene gastos que mostrar: la columna sería puro cero
     const yearsGasto = years.filter(y=>y<=yNow);
@@ -2929,9 +2964,17 @@ function UnitsScreen() {
             <td style="padding:11px 10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">CASH FLOW AFTER DEBT SERVICE</td>
             ${yearsGasto.map(y=>{const n=yearTotal(y)-yearExp(y)-deudaY(y);return `<td style="padding:11px 10px;text-align:right;font-size:15px;font-weight:800;color:${n>=0?'#2d6e4e':'#9c3030'}">${n<0?'('+money(-n).slice(1)+')':money(n)}</td>`;}).join('')}
           </tr>`:''}
+          ${noOp.length?`${Object.keys(NO_OPERATIVAS).filter(t=>noOp.some(e=>e.category===t)).map(t=>`<tr style="border-top:1px solid #f2ecdf">
+            <td style="padding:8px 10px;font-size:10px;font-weight:700;color:#8b7355">${({construccion:'Construction & equipment',deuda_empresas:'Intercompany debt payments',venta:'Sale costs'})[t]}</td>
+            ${yearsGasto.map(y=>{const v=noOpY(y,t);return `<td style="padding:8px 10px;text-align:right;font-size:12px;color:${v?'#9c3030':'#d5cdbb'}">${v?'('+money(v).slice(1)+')':'\u2014'}</td>`;}).join('')}
+          </tr>`).join('')}
+          <tr style="border-top:2px solid #2d6e4e;background:#f2f8f4">
+            <td style="padding:11px 10px;font-size:10px;font-weight:800;color:#2d6e4e;letter-spacing:.5px">CASH FLOW AFTER ALL ITEMS</td>
+            ${yearsGasto.map(y=>{const n=yearTotal(y)-yearExp(y)-deudaY(y)-noOpY(y);return `<td style="padding:11px 10px;text-align:right;font-size:15px;font-weight:800;color:${n>=0?'#2d6e4e':'#9c3030'}">${n<0?'('+money(-n).slice(1)+')':money(n)}</td>`;}).join('')}
+          </tr>`:''}
         </tbody>
       </table>
-      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit across ${rentable.length} units, accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment) and include costs booked to common areas. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).${prestamos.length?' Debt service is a financing cost, not an operating cost, so it is shown below net operating income; it comprises the loan installments recorded in the accounting system.':''}</div></div>`;
+      <div class="note">Condominium fees are a fixed monthly charge of $${CONDO_MONTHLY.toFixed(2)} per unit across ${rentable.length} units, accrued from the first month of operation through the current month. All other expenses are recorded on a cash basis (date of payment) and include costs booked to common areas. Utilities are billed by the Aruban providers (ELMAR \u2014 electricity, WEB \u2014 water).${prestamos.length?' Debt service is a financing cost, not an operating cost, so it is shown below net operating income; it comprises the loan installments recorded in the accounting system.':''}${noOp.length?' Non-operating items (construction and equipment, payments between related companies, costs of selling a unit) are shown below cash flow after debt service and are not part of operating income.':''}</div></div>`;
 
     const logoUrl = `${window.location.origin}/customcolor_text-logoname_transparent_background.png`;
     const rango = years.length ? ` \u00b7 ${years[0]}\u2013${years[years.length-1]}` : '';
@@ -6810,7 +6853,12 @@ function ReservationsScreen() {
                     }).sort((a,b)=>b.date.localeCompare(a.date));
                     const totalExp = filtExp.reduce((s,e)=>s+e.amount,0);
                     const prestamoExp = filtExp.filter(e=>e.category==='préstamo').reduce((s,e)=>s+e.amount,0);
-                    const gastosOp = totalExp - prestamoExp;
+                    // Construcción, deuda entre empresas y costos de venta no son de operar la
+                    // propiedad: salen del neto operativo y se muestran aparte.
+                    const noOpPorTipo = {};
+                    filtExp.filter(esNoOperativa).forEach(e=>{ noOpPorTipo[e.category]=(noOpPorTipo[e.category]||0)+e.amount; });
+                    const noOpExp = Object.values(noOpPorTipo).reduce((s,v)=>s+v,0);
+                    const gastosOp = totalExp - prestamoExp - noOpExp;
 
                     // Ingresos COBRADOS: las reservas se cobran el mes siguiente al checkout,
                     // así que el mes actual (y futuros) del año en curso todavía no se cobraron.
@@ -6825,7 +6873,7 @@ function ReservationsScreen() {
                               .reduce((s,r)=>s+parseIncome(r.income),0)
                           : totalIncome);
                     const hayPendiente = cobradoIncome !== totalIncome;
-                    const neto = cobradoIncome - gastosOp;       // neto OPERATIVO (sin préstamo)
+                    const neto = cobradoIncome - gastosOp;       // neto OPERATIVO (sin préstamo ni partidas no operativas)
                     const flujo = cobradoIncome - totalExp;      // flujo de caja (con préstamo)
 
                     const saveExp = async () => {
@@ -6883,7 +6931,7 @@ function ReservationsScreen() {
                                 {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
                               </select>
                               <select className="minp msel" style={{flex:1}} value={expF.category} onChange={e=>setExpF(p=>({...p,category:e.target.value}))}>
-                                {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                {EXP_CATS.map(c=><option key={c} value={c}>{EXP_CAT_LABEL[c]||c}</option>)}
                               </select>
                             </div>
                             <input className="minp" value={expF.concept} onChange={e=>setExpF(p=>({...p,concept:e.target.value}))} placeholder="Concepto (ej: repuesto A/C, plomero...)"/>
@@ -6913,11 +6961,17 @@ function ReservationsScreen() {
                             <div style={{fontSize:8,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.4,marginTop:3,fontWeight:700}}>Neto operativo{hayPendiente?' (cobrado)':''}</div>
                           </div>
                         </div>
-                        {prestamoExp!==0&&(
-                          <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 12px',marginBottom:hayPendiente?4:10,flexWrap:'wrap'}}>
-                            <span style={{fontSize:10,color:'var(--muted)'}}>🏦 Préstamo: <strong style={{color:'var(--urgent)'}}>−{fmtMoney2(prestamoExp)}</strong></span>
+                        {(prestamoExp!==0||noOpExp!==0)&&(
+                          <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:10,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'8px 12px',marginBottom:noOpExp!==0?2:(hayPendiente?4:10),flexWrap:'wrap'}}>
+                            {prestamoExp!==0&&<span style={{fontSize:10,color:'var(--muted)'}}>🏦 Préstamo: <strong style={{color:'var(--urgent)'}}>−{fmtMoney2(prestamoExp)}</strong></span>}
+                            {noOpExp!==0&&<span style={{fontSize:10,color:'var(--muted)'}}>🏗️ No operativo: <strong style={{color:'var(--urgent)'}}>−{fmtMoney2(noOpExp)}</strong></span>}
                             <span style={{fontSize:10,color:'var(--muted)'}}>→</span>
                             <span style={{fontSize:10,color:'var(--muted)'}}>Flujo de caja: <strong style={{color:flujo>=0?'var(--done)':'var(--urgent)',fontSize:12}}>{fmtMoney2(flujo)}</strong></span>
+                          </div>
+                        )}
+                        {noOpExp!==0&&(
+                          <div style={{fontSize:9,color:'var(--muted)',textAlign:'center',marginBottom:hayPendiente?4:10,lineHeight:1.5}}>
+                            {Object.entries(noOpPorTipo).map(([k,v])=>`${NO_OPERATIVAS[k]} ${fmtMoney2(v)}`).join(' · ')}
                           </div>
                         )}
                         {hayPendiente&&(
@@ -7001,7 +7055,7 @@ function ReservationsScreen() {
                                               <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,padding:`6px 14px 6px ${indent}px`,borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
                                                 <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})} title="Tocar para editar">
                                                   <div style={{fontSize:11,fontWeight:600,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showName?nameOf(e):(descOf(e)||e.date)}</div>
-                                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showName&&descOf(e)?descOf(e)+' · ':''}{e.date} · {e.category} · ✎</div>
+                                                  <div style={{fontSize:9,color:'var(--muted)',marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showName&&descOf(e)?descOf(e)+' · ':''}{e.date} · {EXP_CAT_LABEL[e.category]||e.category} · ✎</div>
                                                 </div>
                                                 <div style={{fontSize:12,fontWeight:800,color:e.amount<0?'var(--done)':'var(--urgent)',flexShrink:0,cursor:'pointer'}} onClick={()=>setEditExp({...e})}>{e.amount<0?'+'+fmtMoney2(-e.amount):'−'+fmtMoney2(e.amount)}</div>
                                                 <button onClick={()=>delExp(e.id)} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:'2px 4px',flexShrink:0}}>×</button>
@@ -7048,7 +7102,7 @@ function ReservationsScreen() {
                                     {UNIT_IDS.map(id=><option key={id} value={id}>{uname(id)}</option>)}
                                   </select>
                                   <select className="minp msel" style={{flex:1}} value={editExp.category} onChange={e=>setEditExp(p=>({...p,category:e.target.value}))}>
-                                    {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                    {EXP_CATS.map(c=><option key={c} value={c}>{EXP_CAT_LABEL[c]||c}</option>)}
                                   </select>
                                 </div>
                                 <input className="minp" value={editExp.concept} onChange={e=>setEditExp(p=>({...p,concept:e.target.value}))} placeholder="Concepto"/>
@@ -7212,7 +7266,7 @@ function ReservationsScreen() {
                                           )}
                                           <select value={r.category} disabled={qbBusy} onChange={e=>updRow(r,{category:e.target.value})}
                                             style={{fontSize:9,padding:'2px 4px',borderRadius:6,border:'1px solid var(--border)',background:'var(--surface)',color:'var(--muted)',maxWidth:100}}>
-                                            {['mantenimiento','limpieza','repuestos','servicios','préstamo','otro'].map(c=><option key={c} value={c}>{c}</option>)}
+                                            {EXP_CATS.map(c=><option key={c} value={c}>{EXP_CAT_LABEL[c]||c}</option>)}
                                           </select>
                                         </div>
                                       </div>
