@@ -387,7 +387,7 @@ const UNIT_IDS  = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20,100,101];
 // siguiente es del nuevo propietario y deja de contar: ocupación, calendario, recordatorios,
 // condominio e informes. Su historia hasta esa fecha se conserva.
 // Para registrar otra venta basta con agregar una línea acá.
-const UNIDADES_VENDIDAS = { 17: '2026-08-31' };
+const UNIDADES_VENDIDAS = { 17: '2026-08-12' };   // PAS 17: vendida el 12/8/2026 (QuickBooks registra la venta ese día)
 const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 // ¿La unidad es tuya en esa fecha? (fecha: Date o 'YYYY-MM-DD')
 const unidadActivaEn = (uid, fecha) => {
