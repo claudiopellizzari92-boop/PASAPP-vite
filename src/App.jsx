@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import './styles.css';
+import AgentChat from './AgentChat.jsx';
 
 const API = 'https://porta-al-sole-api.onrender.com/api';
 
@@ -9410,7 +9411,7 @@ ${bloques}
 
 /* APP */
 function App() {
-  const { user, loading } = useAuth();
+  const { user, loading, token, fetchTasks } = useAuth();
   const [tab, setTab] = useState('dashboard');
   const [dark, setDark] = useState(() => localStorage.getItem('ps_theme')==='dark');
 
@@ -9452,7 +9453,7 @@ function App() {
   };
 
   return (
-    <div className="app">
+    <div className="app" style={{position:'relative'}}>
       {/* Con 8 pestañas la barra ya no entra en pantallas angostas: se vuelve
           deslizable en vez de apretar los rótulos hasta cortarlos.
           flex:1 0 auto hace que se repartan el ancho cuando sobra espacio y
@@ -9477,6 +9478,7 @@ function App() {
       <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
         {screens[tab]||screens.tasks}
       </div>
+      <AgentChat token={token} onChanged={()=>fetchTasks(true)}/>
       <nav className="nav">
         {tabs.map(t=>(
           <button key={t.id} className={`nav-item ${tab===t.id?'active':''}`}
