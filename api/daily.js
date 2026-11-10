@@ -1,4 +1,4 @@
-// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v1.0
+// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v1.1
 // Lo ejecuta Vercel Cron cada mañana (ver "crons" en vercel.json).
 // Variables de entorno en Vercel:
 //   ANTHROPIC_API_KEY    (ya existe)
@@ -57,14 +57,28 @@ async function login() {
   throw new Error(`No pude iniciar sesión: ${last?.message}`);
 }
 
+// Telegram acepta máx. 4096 caracteres por mensaje: si es más largo, se divide en varios (sin cortar líneas)
+function partir(text, max = 3800) {
+  const partes = []; let actual = '';
+  for (const linea of text.split('\n')) {
+    if ((actual + '\n' + linea).length > max && actual) { partes.push(actual); actual = ''; }
+    actual = actual ? `${actual}\n${linea}` : linea;
+    while (actual.length > max) { partes.push(actual.slice(0, max)); actual = actual.slice(max); }
+  }
+  if (actual.trim()) partes.push(actual);
+  return partes;
+}
+
 async function telegram(text) {
-  const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type':'application/json' },
-    body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHAT_ID, text: text.slice(0, 4000), disable_web_page_preview: true }),
-  });
-  const d = await r.json();
-  if (!d.ok) throw new Error(`Telegram: ${d.description}`);
+  for (const parte of partir(text)) {
+    const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHAT_ID, text: parte, disable_web_page_preview: true }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(`Telegram: ${d.description}`);
+  }
 }
 
 const fechaCompletada = t => {
@@ -148,16 +162,16 @@ async function redactar(datos) {
       max_tokens: 1500,
       system: `Eres el agente de mantenimiento de "Porta al Sole" (16 townhouses de alquiler vacacional en Aruba, clima salino y caluroso).
 Cada mañana escribes un resumen para Claudio, el administrador, que lo leerá en Telegram desde el celular.
-Formato: texto plano (sin markdown, sin asteriscos), con emojis como viñetas, máximo ~2500 caracteres. En español.
+Formato: texto plano (sin markdown, sin asteriscos), con emojis como viñetas. En español. Sé BREVE: máximo 1800 caracteres en total; frases cortas, sin repetir datos.
 Estructura:
 ☀️ Buenos días + una línea con el estado general.
 🔴 Atención hoy: vencidas, vencen hoy y urgentes (formato "PAS 12 · Plomería — Fuga lavamanos (#45)"). Si no hay, dilo.
 👤 Sin asignar (si hay).
 ⏳ Estancadas (si hay).
 ✅ Ayer: completadas y creadas (cantidades + lo más relevante).
-🔍 Patrones: interpreta las fallas repetidas, unidades cargadas y categorías en aumento. Explica la causa probable (salitre, sarro, uso del A/C, equipo viejo...) y recomienda una acción concreta (cambiar equipo, mantenimiento preventivo, revisar instalación). Si no hay patrones, omite la sección.
+🔍 Patrones (máximo 3, los más importantes, 2-3 líneas cada uno): interpreta las fallas repetidas, unidades cargadas y categorías en aumento. Explica la causa probable (salitre, sarro, uso del A/C, equipo viejo...) y recomienda una acción concreta (cambiar equipo, mantenimiento preventivo, revisar instalación). Si no hay patrones, omite la sección.
 🎯 Prioridades: termina con las 3 acciones más importantes del día.
-Usa solo los datos dados; no inventes tareas.`,
+Usa solo los datos dados; no inventes tareas. Si una sección está vacía, omítela en vez de escribir "ninguna".`,
       messages: [{ role: 'user', content: `Datos de hoy:\n${JSON.stringify(datos)}` }],
     }),
   });
