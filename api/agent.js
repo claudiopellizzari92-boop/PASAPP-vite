@@ -1,4 +1,5 @@
-// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.0
+// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.1
+// v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
 // Roles: admin = supervisor (Claudio) · resto = técnico (Ricardo)
 // Variables de entorno en Vercel:
 //   ANTHROPIC_API_KEY  (obligatoria)
@@ -336,7 +337,9 @@ async function runTool(name, input, ctx) {
           else continue;
           if (consumo < 0) continue;
           const rango = rangoPeriodo(m.periodo);
-          const noches = rango && !({100:1,101:1})[uid] ? nochesOcupadas(reservas, uid, rango[0], rango[1]) : null;
+          // La lectura semanal mide lo consumido la semana ANTERIOR (igual que nightsForReading en App.jsx)
+          const rN = rango && /W/.test(m.periodo) ? [addDays(rango[0], -7), rango[0]] : rango;
+          const noches = rN && !({100:1,101:1})[uid] ? nochesOcupadas(reservas, uid, rN[0], rN[1]) : null;
           consumos.push({ periodo: m.periodo, consumo, noches });
         }
         if (!consumos.length) continue;
