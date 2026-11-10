@@ -1,4 +1,5 @@
-// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v2.1
+// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v3.0
+// v3.0: + preventivo de A/C cada 4 meses (modo prueba / creación), reporte mensual el día 1, consumo por noche ocupada
 // v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
 // v2.0: + check-ins con pendientes, consumo anormal de agua/luz y huecos sin reservas
 // Lo ejecuta Vercel Cron cada mañana (ver "crons" en vercel.json).
@@ -10,6 +11,9 @@
 //   TELEGRAM_BOT_TOKEN   token del bot (de @BotFather)
 //   TELEGRAM_CHAT_ID     tu chat id de Telegram
 //   CRON_SECRET          clave para que nadie más pueda ejecutarlo
+//   PREVENTIVO_CREAR     "si" para que el agente CREE las tareas de A/C (sin ella, solo informa = modo prueba)
+// Pruebas a mano:  /api/daily?secret=...            → resumen diario
+//                  /api/daily?secret=...&mensual=1  → además, el reporte mensual del mes anterior
 
 export const config = { maxDuration: 60 };
 
@@ -230,6 +234,20 @@ function analizarReservas(tasks, rs, hoy) {
   return { checkinsConPendientes, alojadosConUrgente, huecos: huecos.slice(0, 6) };
 }
 
+// Noches que corresponden a un período de consumo.
+// Agua semanal: la lectura de la semana W mide la semana ANTERIOR (igual que nightsForReading en App.jsx).
+function rangoNoches(periodo) {
+  const r = rangoPeriodo(periodo);
+  if (!r) return null;
+  return /W/.test(periodo) ? [addDays(r[0], -7), r[0]] : r;
+}
+function contarNoches(rs, uid, periodo, hoy) {
+  if (ESPECIALES[uid]) return null;
+  const r = rangoNoches(periodo); if (!r) return null;
+  let n = 0; for (let d = r[0]; d < r[1] && d <= hoy; d = addDays(d, 1)) if (ocupada(rs, uid, d)) n++;
+  return n;
+}
+
 function analizarConsumos(meds, rs, hoy) {
   const lista = (Array.isArray(meds) ? meds : []).map(m => ({
     unitId: Number(m.unitId ?? m.unit_id), tipo: m.type, periodo: m.week, valor: Number(m.value),
@@ -248,27 +266,154 @@ function analizarConsumos(meds, rs, hoy) {
       if (/^\d{4}-\d{2}$/.test(m.periodo)) c = m.valor;                                   // luz mensual: el valor ES el consumo
       else if (i > 0 && /W/.test(arr[i-1].periodo)) c = +(m.valor - arr[i-1].valor).toFixed(2); // lectura acumulada
       else continue;
-      if (c >= 0) consumos.push({ periodo: m.periodo, c });
+      if (c >= 0) consumos.push({ periodo: m.periodo, c, n: contarNoches(rs, uid, m.periodo, hoy) });
     }
     if (consumos.length < 2) continue;
     const ult = consumos[consumos.length - 1];
     const rango = rangoPeriodo(ult.periodo);
     // Solo la lectura reciente (período que terminó hace menos de 10 días o en curso)
     if (!rango || diffDays(hoy, rango[1]) > 10) continue;
-    const prev = consumos.slice(0, -1).slice(-8);
-    const prom = prev.reduce((s, x) => s + x.c, 0) / prev.length;
+    const prev = consumos.slice(0, -1).slice(-12);
     const um = tipo === 'agua' ? 'm³' : 'kWh';
     const MIN_ABS = tipo === 'agua' ? 3 : 60, MIN_VACIO = tipo === 'agua' ? 2 : 30;
-    // La lectura semanal mide lo consumido la semana ANTERIOR (igual que nightsForReading en App.jsx)
-    const [nIni, nFin] = /W/.test(ult.periodo) ? [addDays(rango[0], -7), rango[0]] : rango;
-    let noches = null;
-    if (!ESPECIALES[uid]) { noches = 0; for (let d = nIni; d < nFin && d <= hoy; d = addDays(d, 1)) if (ocupada(rs, uid, d)) noches++; }
+    // Promedio por noche ocupada (necesita al menos 3 períodos con huéspedes), igual que Registros
+    const conNoches = prev.filter(x => x.n > 0);
+    const promNoche = conNoches.length >= 3 ? conNoches.reduce((s, x) => s + x.c / x.n, 0) / conNoches.length : null;
+    const promTotal = prev.reduce((s, x) => s + x.c, 0) / prev.length;
+    const fmt = v => tipo === 'agua' ? `${Math.round(v * 1000)} L` : `${v.toFixed(1)} kWh`;
     const motivos = [];
-    if (ult.c >= MIN_ABS && ult.c > 2 * prom) motivos.push(`más del doble de su promedio (${prom.toFixed(1)} ${um})`);
-    if (noches === 0 && ult.c >= MIN_VACIO) motivos.push('sin huéspedes en ese período');
-    if (motivos.length) alertas.push({ unidad: uname(uid), tipo, periodo: ult.periodo, consumo: `${ult.c} ${um}`, nochesOcupadas: noches, motivo: motivos.join(' y ') });
+    if (ult.n === 0 && ult.c >= MIN_VACIO) {
+      motivos.push('consumo con la unidad vacía');
+    } else if (ult.c >= MIN_ABS) {
+      if (promNoche != null && ult.n > 0 && ult.c / ult.n > 2 * promNoche)
+        motivos.push(`${fmt(ult.c / ult.n)}/noche, más del doble de lo normal (${fmt(promNoche)}/noche)`);
+      else if (promNoche == null && ult.c > 2 * promTotal)
+        motivos.push(`más del doble de su promedio (${promTotal.toFixed(1)} ${um}), sin historial suficiente por noche`);
+    }
+    if (motivos.length) alertas.push({ unidad: uname(uid), tipo, periodo: ult.periodo, consumo: `${ult.c} ${um}`, nochesOcupadas: ult.n, motivo: motivos.join('; ') });
   }
   return alertas.slice(0, 6);
+}
+
+/* ---------- PREVENTIVO DE A/C (cada 4 meses desde el último en esa unidad) ---------- */
+const UNIDADES_AC = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20,100]; // casas + Recepción (Áreas Comunes no tiene A/C)
+const MESES_AC = 4;
+const addMonths = (s, n) => { const d = new Date(`${s}T12:00:00Z`); d.setUTCMonth(d.getUTCMonth() + n); return d.toISOString().slice(0,10); };
+const sinAcentos = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+// ¿Es una tarea de mantenimiento de A/C? (por categoría o texto + que sea preventivo/limpieza/servicio)
+function esMantAC(t) {
+  const txt = sinAcentos(`${t.title} ${t.description || ''}`);
+  const catTxt = sinAcentos(t.category);
+  const deAC = /hvac|aire|a\/c/.test(catTxt) || /\ba\/?c\b|aire|aires|split|minisplit|filtro/.test(txt);
+  const esMant = t.type === 'preventivo' || /manten|limpi|filtro|servicio|preventiv|lavado/.test(txt);
+  return deAC && esMant;
+}
+
+function analizarPreventivo(tasks, hoy) {
+  const lista = [];
+  for (const uid of UNIDADES_AC) {
+    if (!activaEn(uid, hoy)) continue;
+    const delUnidad = tasks.filter(t => Number(t.unitId) === uid && esMantAC(t));
+    const abierta = delUnidad.find(t => t.status !== 'completado');
+    const hechas = delUnidad.filter(t => t.status === 'completado')
+      .map(t => ({ t, fecha: fechaCompletada(t) || toDay(t.dueDate) || toDay(t.createdAt) }))
+      .filter(x => x.fecha).sort((a, b) => b.fecha.localeCompare(a.fecha));
+    const ultimo = hechas[0];
+    if (!ultimo) { lista.push({ uid, unidad: uname(uid), estado: 'sin registro', abierta: abierta ? `#${abierta.id}` : null }); continue; }
+    const proximo = addMonths(ultimo.fecha, MESES_AC);
+    const dias = diffDays(proximo, hoy);
+    lista.push({
+      uid, unidad: uname(uid), ultimo: ultimo.fecha, ultimaTarea: `#${ultimo.t.id} ${ultimo.t.title}`, proximo, diasParaVencer: dias,
+      abierta: abierta ? `#${abierta.id}` : null,
+      estado: abierta ? 'ya programada' : dias <= 7 ? 'toca crear' : 'al día',
+    });
+  }
+  return lista;
+}
+
+async function ejecutarPreventivo(token, lista, hoy) {
+  const crear = String(process.env.PREVENTIVO_CREAR || '').toLowerCase() === 'si';
+  const porCrear = lista.filter(x => x.estado === 'toca crear');
+  const creadas = [];
+  if (crear) {
+    for (const x of porCrear) {
+      const payload = {
+        unitId: x.uid, level: 'N1', category: 'hvac', type: 'preventivo', priority: 'programado', status: 'pendiente',
+        title: 'Mantenimiento A/C (preventivo)',
+        description: `Creada automáticamente por el agente. Revisar y limpiar los A/C de todos los niveles. Último mantenimiento: ${x.ultimo} (${x.ultimaTarea}).`,
+        assignee: 'Ricardo',
+        dueDate: x.proximo < hoy ? hoy : x.proximo,
+      };
+      try { const t = await api(token, '/tasks', { method:'POST', body: JSON.stringify(payload) }); creadas.push(`${x.unidad} (#${t?.id ?? '?'}, para el ${payload.dueDate})`); }
+      catch (e) { creadas.push(`${x.unidad}: ERROR al crear (${e.message})`); }
+    }
+  }
+  return {
+    modo: crear ? 'creación activa' : 'MODO PRUEBA (no se creó nada; para activar: variable PREVENTIVO_CREAR=si)',
+    creadas,
+    seCrearian: crear ? [] : porCrear.map(x => `${x.unidad}: último ${x.ultimo}, tocaba el ${x.proximo}`),
+    sinRegistro: lista.filter(x => x.estado === 'sin registro' && !x.abierta).map(x => x.unidad),
+    proximos30dias: lista.filter(x => x.estado === 'al día' && x.diasParaVencer <= 30).map(x => `${x.unidad}: ${x.proximo}`),
+  };
+}
+
+/* ---------- REPORTE MENSUAL ---------- */
+function datosMes(tasks, ini, fin) {
+  const creadas = tasks.filter(t => { const d = toDay(t.createdAt); return d && d >= ini && d < fin; });
+  const resueltas = tasks.map(t => ({ t, f: t.status === 'completado' ? fechaCompletada(t) : null }))
+    .filter(x => x.f && x.f >= ini && x.f < fin);
+  const tiempos = resueltas.map(x => diffDays(x.f, toDay(x.t.createdAt) || x.f)).filter(n => n >= 0);
+  const cuenta = (arr, key) => { const o = {}; for (const v of arr) o[key(v)] = (o[key(v)] || 0) + 1; return Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}: ${n}`); };
+  return {
+    creadas: creadas.length,
+    resueltas: resueltas.length,
+    diasPromedioResolucion: tiempos.length ? +(tiempos.reduce((a, b) => a + b, 0) / tiempos.length).toFixed(1) : null,
+    resueltasTarde: resueltas.filter(x => toDay(x.t.dueDate) && x.f > toDay(x.t.dueDate)).length,
+    urgentesCreadas: creadas.filter(t => t.priority === 'urgente').length,
+    unidadesConMasTareas: cuenta(creadas, t => uname(t.unitId)),
+    categorias: cuenta(creadas, t => cat(t.category)),
+    tardaronMas: resueltas.map(x => ({ x, d: diffDays(x.f, toDay(x.t.createdAt) || x.f) })).sort((a, b) => b.d - a.d).slice(0, 3)
+      .map(({ x, d }) => `${uname(x.t.unitId)} — ${x.t.title} (#${x.t.id}): ${d} días`),
+  };
+}
+
+function analizarMes(tasks, hoy) {
+  const [y, m] = hoy.split('-').map(Number);
+  const iniMes = `${y}-${String(m).padStart(2,'0')}-01`;
+  const iniAnt = addMonths(iniMes, -1), iniPrev = addMonths(iniMes, -2);
+  const nombre = d => new Date(`${d}T12:00:00Z`).toLocaleDateString('es', { month:'long', year:'numeric', timeZone:'UTC' });
+  return {
+    mes: nombre(iniAnt),
+    actual: datosMes(tasks, iniAnt, iniMes),
+    mesAnterior: { mes: nombre(iniPrev), ...datosMes(tasks, iniPrev, iniAnt) },
+    abiertasAlCierre: tasks.filter(t => t.status !== 'completado' && toDay(t.createdAt) && toDay(t.createdAt) < iniMes).length,
+  };
+}
+
+async function redactarMensual(datos) {
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type':'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version':'2023-06-01' },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 4000,
+      system: `Eres el agente de mantenimiento de "Porta al Sole" (townhouses de alquiler vacacional en Aruba). Ricardo es el único encargado de mantenimiento; Claudio, el administrador, supervisa.
+Escribe el REPORTE MENSUAL para Claudio, que lo leerá en Telegram. Texto plano (sin markdown ni asteriscos), emojis como viñetas, en español, máximo 1800 caracteres.
+Estructura:
+📊 Reporte de <mes>: una línea de balance general.
+🔧 Trabajo de Ricardo: tareas resueltas, tiempo promedio de resolución, cuántas se resolvieron tarde, comparación con el mes anterior (mejoró/empeoró).
+📥 Lo que entró: tareas creadas, urgentes, unidades y categorías con más tareas.
+🐢 Las que más tardaron (si hay).
+💡 Conclusión: 2-3 recomendaciones concretas para el próximo mes.
+Usa solo los datos dados; si un dato es null o 0, no lo inventes.`,
+      messages: [{ role: 'user', content: `Datos:\n${JSON.stringify(datos)}` }],
+    }),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d?.error?.message || `Anthropic ${r.status}`);
+  const texto = d.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  return d.stop_reason === 'max_tokens' ? `${texto}…\n\n(reporte recortado)` : texto;
 }
 
 /* ---------- REDACCIÓN CON CLAUDE ---------- */
@@ -281,14 +426,15 @@ async function redactar(datos) {
       max_tokens: 4000,
       system: `Eres el agente de mantenimiento de "Porta al Sole" (16 townhouses de alquiler vacacional en Aruba, clima salino y caluroso).
 Cada mañana escribes un resumen para Claudio, el administrador, que lo leerá en Telegram desde el celular.
-Formato: texto plano (sin markdown, sin asteriscos), con emojis como viñetas. En español. Sé BREVE: máximo 2200 caracteres en total; frases cortas, sin repetir datos.
+Formato: texto plano (sin markdown, sin asteriscos), con emojis como viñetas. En español. Sé BREVE: máximo 2500 caracteres en total; frases cortas, sin repetir datos.
 Estructura:
 ☀️ Buenos días + una línea con el estado general.
 🔴 Atención hoy: vencidas, vencen hoy y urgentes (formato "PAS 12 · Plomería — Fuga lavamanos (#45)"). Si no hay, dilo.
 👤 Sin asignar (si hay).
 ⏳ Estancadas (si hay).
 🏠 Check-ins con pendientes: unidades que reciben huésped hoy/mañana/pasado y tienen tareas abiertas (di qué hay que resolver antes). Incluye huéspedes alojados en unidades con tareas urgentes.
-💧 Consumo anormal: alertas de agua o luz (unidad, consumo, motivo) y la causa probable (fuga, inodoro que corre, A/C encendido sin huéspedes). Recomienda que Ricardo lo revise.
+💧 Consumo anormal: alertas de agua o luz (unidad, consumo, noches ocupadas, motivo) y la causa probable (fuga, inodoro que corre, A/C encendido sin huéspedes). Recomienda que Ricardo lo revise.
+❄️ Preventivo A/C: según "preventivo": si hay tareas creadas, lístalas; si está en MODO PRUEBA, di claramente "Modo prueba" y lista las que se crearían; menciona las casas sin registro (en una línea) y las que tocan en los próximos 30 días (en una línea). Si todo está vacío, omite la sección.
 📅 Huecos para trabajar: unidades con tareas pendientes y noches libres próximas; sugiere usar ese hueco.
 ✅ Ayer: completadas y creadas (cantidades + lo más relevante).
 🔍 Patrones (máximo 3, los más importantes, 2-3 líneas cada uno): interpreta las fallas repetidas, unidades cargadas y categorías en aumento. Explica la causa probable (salitre, sarro, uso del A/C, equipo viejo...) y recomienda una acción concreta (cambiar equipo, mantenimiento preventivo, revisar instalación). Si no hay patrones, omite la sección.
@@ -325,10 +471,20 @@ export default async function handler(req, res) {
     const tasks = Array.isArray(tasksRaw) ? tasksRaw : [];
     const hoy = dayStr(new Date());
     const rs = normReservas(resRaw);
-    const datos = { ...analizar(tasks, hoy), ...analizarReservas(tasks, rs, hoy), consumoAnormal: analizarConsumos(medsRaw, rs, hoy) };
+    const listaAC = analizarPreventivo(tasks, hoy);
+    const preventivo = await ejecutarPreventivo(token, listaAC, hoy);
+    const datos = { ...analizar(tasks, hoy), ...analizarReservas(tasks, rs, hoy), consumoAnormal: analizarConsumos(medsRaw, rs, hoy), preventivo };
     const texto = await redactar(datos);
     await telegram(texto);
-    return res.status(200).json({ ok: true, enviado: texto.length, totales: datos.totales });
+
+    // Reporte mensual: el día 1 de cada mes (o a mano con &mensual=1)
+    let mensual = false;
+    if (hoy.endsWith('-01') || (req.query && req.query.mensual)) {
+      await telegram(await redactarMensual(analizarMes(tasks, hoy)));
+      mensual = true;
+    }
+    // En la respuesta del navegador se ve qué detectó del A/C por unidad (para verificar)
+    return res.status(200).json({ ok: true, enviado: texto.length, mensual, totales: datos.totales, preventivoAC: listaAC.map(({ uid, ...x }) => x), preventivo });
   } catch (e) {
     console.error('daily error', e);
     try { await telegram(`⚠️ El agente de Porta al Sole no pudo generar el resumen de hoy: ${e.message}`); } catch {}
