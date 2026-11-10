@@ -1,4 +1,5 @@
-// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.1
+// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.2
+// v2.2: alertas de consumo por noche ocupada (igual que la pestaña Registros)
 // v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
 // Roles: admin = supervisor (Claudio) · resto = técnico (Ricardo)
 // Variables de entorno en Vercel:
@@ -344,17 +345,24 @@ async function runTool(name, input, ctx) {
         }
         if (!consumos.length) continue;
         const ult = consumos[consumos.length - 1];
-        const previos = consumos.slice(0, -1).slice(-8);
+        const previos = consumos.slice(0, -1).slice(-12);
         const prom = previos.length ? previos.reduce((s, c) => s + c.consumo, 0) / previos.length : null;
         const unidadMed = tipo === 'agua' ? 'm³' : 'kWh';
         const MIN_ABS = tipo === 'agua' ? 3 : 60, MIN_VACIO = tipo === 'agua' ? 2 : 30;
-        if (prom != null && ult.consumo >= MIN_ABS && ult.consumo > 2 * prom)
-          alertas.push(`${uname(uid)} · ${tipo}: ${ult.consumo} ${unidadMed} en ${ult.periodo}, más del doble de su promedio (${prom.toFixed(1)})`);
+        // Promedio por noche ocupada (al menos 3 períodos con huéspedes), igual que Registros
+        const conN = previos.filter(c => c.noches > 0);
+        const promNoche = conN.length >= 3 ? conN.reduce((s, c) => s + c.consumo / c.noches, 0) / conN.length : null;
+        const fmt = v => tipo === 'agua' ? `${Math.round(v * 1000)} L` : `${v.toFixed(1)} kWh`;
         if (ult.noches === 0 && ult.consumo >= MIN_VACIO)
-          alertas.push(`${uname(uid)} · ${tipo}: ${ult.consumo} ${unidadMed} en ${ult.periodo} sin huéspedes`);
+          alertas.push(`${uname(uid)} · ${tipo}: ${ult.consumo} ${unidadMed} en ${ult.periodo} con la unidad vacía`);
+        else if (ult.consumo >= MIN_ABS && promNoche != null && ult.noches > 0 && ult.consumo / ult.noches > 2 * promNoche)
+          alertas.push(`${uname(uid)} · ${tipo}: ${fmt(ult.consumo / ult.noches)}/noche en ${ult.periodo}, más del doble de lo normal (${fmt(promNoche)}/noche)`);
+        else if (ult.consumo >= MIN_ABS && promNoche == null && prom != null && ult.consumo > 2 * prom)
+          alertas.push(`${uname(uid)} · ${tipo}: ${ult.consumo} ${unidadMed} en ${ult.periodo}, más del doble de su promedio (${prom.toFixed(1)}); poco historial por noche`);
         series.push({
           unidad: uname(uid), tipo, unidadMedida: unidadMed,
           promedioAnterior: prom != null ? +prom.toFixed(2) : null,
+          promedioPorNoche: promNoche != null ? +promNoche.toFixed(3) : null,
           periodos: consumos.slice(-n),
         });
       }
