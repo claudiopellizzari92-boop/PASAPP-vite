@@ -1,4 +1,5 @@
-// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v2.0
+// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v2.1
+// v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
 // v2.0: + check-ins con pendientes, consumo anormal de agua/luz y huecos sin reservas
 // Lo ejecuta Vercel Cron cada mañana (ver "crons" en vercel.json).
 // Variables de entorno en Vercel:
@@ -216,7 +217,12 @@ function analizarReservas(tasks, rs, hoy) {
       if (libre && ini === null) ini = d;
       if (!libre && ini !== null) {
         const noches = diffDays(d, ini);
-        if (noches >= 2) { huecos.push({ unidad: uname(uid), libreDesde: ini, hasta: d, noches, pendientes: abiertasDe(uid).length }); break; }
+        if (noches >= 2) {
+          huecos.push(i === 14
+            ? { unidad: uname(uid), libreDesde: ini, sinReservasHasta: 'al menos 2 semanas', pendientes: abiertasDe(uid).length }
+            : { unidad: uname(uid), libreDesde: ini, hasta: d, noches, pendientes: abiertasDe(uid).length });
+          break;
+        }
         ini = null;
       }
     }
@@ -253,8 +259,10 @@ function analizarConsumos(meds, rs, hoy) {
     const prom = prev.reduce((s, x) => s + x.c, 0) / prev.length;
     const um = tipo === 'agua' ? 'm³' : 'kWh';
     const MIN_ABS = tipo === 'agua' ? 3 : 60, MIN_VACIO = tipo === 'agua' ? 2 : 30;
+    // La lectura semanal mide lo consumido la semana ANTERIOR (igual que nightsForReading en App.jsx)
+    const [nIni, nFin] = /W/.test(ult.periodo) ? [addDays(rango[0], -7), rango[0]] : rango;
     let noches = null;
-    if (!ESPECIALES[uid]) { noches = 0; for (let d = rango[0]; d < rango[1] && d <= hoy; d = addDays(d, 1)) if (ocupada(rs, uid, d)) noches++; }
+    if (!ESPECIALES[uid]) { noches = 0; for (let d = nIni; d < nFin && d <= hoy; d = addDays(d, 1)) if (ocupada(rs, uid, d)) noches++; }
     const motivos = [];
     if (ult.c >= MIN_ABS && ult.c > 2 * prom) motivos.push(`más del doble de su promedio (${prom.toFixed(1)} ${um})`);
     if (noches === 0 && ult.c >= MIN_VACIO) motivos.push('sin huéspedes en ese período');
