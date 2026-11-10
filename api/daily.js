@@ -1,4 +1,4 @@
-// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v1.1
+// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v1.2
 // Lo ejecuta Vercel Cron cada mañana (ver "crons" en vercel.json).
 // Variables de entorno en Vercel:
 //   ANTHROPIC_API_KEY    (ya existe)
@@ -159,7 +159,7 @@ async function redactar(datos) {
     headers: { 'content-type':'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version':'2023-06-01' },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 1500,
+      max_tokens: 4000,
       system: `Eres el agente de mantenimiento de "Porta al Sole" (16 townhouses de alquiler vacacional en Aruba, clima salino y caluroso).
 Cada mañana escribes un resumen para Claudio, el administrador, que lo leerá en Telegram desde el celular.
 Formato: texto plano (sin markdown, sin asteriscos), con emojis como viñetas. En español. Sé BREVE: máximo 1800 caracteres en total; frases cortas, sin repetir datos.
@@ -177,7 +177,9 @@ Usa solo los datos dados; no inventes tareas. Si una sección está vacía, omí
   });
   const d = await r.json();
   if (!r.ok) throw new Error(d?.error?.message || `Anthropic ${r.status}`);
-  return d.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  const texto = d.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  // Si se quedó sin espacio, avisar en vez de cortar en silencio
+  return d.stop_reason === 'max_tokens' ? `${texto}…\n\n(resumen recortado)` : texto;
 }
 
 /* ---------- HANDLER ---------- */
