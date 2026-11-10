@@ -1,4 +1,5 @@
-// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v3.0
+// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v3.1
+// v3.1: el preventivo de A/C mira solo el TÍTULO e ignora las verificaciones de entrada/salida/cambio
 // v3.0: + preventivo de A/C cada 4 meses (modo prueba / creación), reporte mensual el día 1, consumo por noche ocupada
 // v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
 // v2.0: + check-ins con pendientes, consumo anormal de agua/luz y huecos sin reservas
@@ -299,14 +300,15 @@ function analizarConsumos(meds, rs, hoy) {
 const UNIDADES_AC = [1,2,3,4,8,10,11,12,13,14,15,16,17,18,19,20,100]; // casas + Recepción (Áreas Comunes no tiene A/C)
 const MESES_AC = 4;
 const addMonths = (s, n) => { const d = new Date(`${s}T12:00:00Z`); d.setUTCMonth(d.getUTCMonth() + n); return d.toISOString().slice(0,10); };
-const sinAcentos = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const sinAcentos = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
-// ¿Es una tarea de mantenimiento de A/C? (por categoría o texto + que sea preventivo/limpieza/servicio)
+// ¿Es una tarea de mantenimiento de A/C? Se mira SOLO el título (ej. "Mantenimiento aires"),
+// porque las verificaciones de entrada/salida mencionan el A/C en su checklist y no son mantenimiento.
 function esMantAC(t) {
-  const txt = sinAcentos(`${t.title} ${t.description || ''}`);
-  const catTxt = sinAcentos(t.category);
-  const deAC = /hvac|aire|a\/c/.test(catTxt) || /\ba\/?c\b|aire|aires|split|minisplit|filtro/.test(txt);
-  const esMant = t.type === 'preventivo' || /manten|limpi|filtro|servicio|preventiv|lavado/.test(txt);
+  const tit = sinAcentos(t.title);
+  if (/verificaci/.test(tit)) return false;
+  const deAC = /\ba\/?c\b|aire|split|filtro/.test(tit);
+  const esMant = /manten|limpi|filtro|servicio|preventiv|lavado/.test(tit);
   return deAC && esMant;
 }
 
