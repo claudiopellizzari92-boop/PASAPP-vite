@@ -1,8 +1,13 @@
+# netlify.toml — v2.0
+# La app ahora vive en Vercel (ahí funciona el asistente IA y el agente diario).
+# Esta regla manda cualquier visita a portaalsole.netlify.app hacia portaalsole.vercel.app.
+
 [build]
   command = "npm run build"
   publish = "dist"
 
 [[redirects]]
   from = "/*"
-  to = "/index.html"
-  status = 200
+  to = "https://portaalsole.vercel.app/:splat"
+  status = 301
+  force = true
