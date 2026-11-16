@@ -1,4 +1,5 @@
-// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.3
+// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.4
+// v2.4: historial de conversaciones en Upstash Redis (cada uno ve lo suyo; el admin ve todo)
 // v2.3: el servidor comprueba lo que se guardó de verdad (avisos ✅), corrige si el modelo dice "hecho" sin guardar,
 //       Ricardo crea tareas sin "¿Confirmo?", y aviso de unidades que no existen
 // v2.2: alertas de consumo por noche ocupada (igual que la pestaña Registros)
@@ -7,6 +8,8 @@
 // Variables de entorno en Vercel:
 //   ANTHROPIC_API_KEY  (obligatoria)
 //   ANTHROPIC_MODEL    (opcional, por defecto claude-haiku-5-5)
+//   KV_REST_API_URL / KV_REST_API_TOKEN  (o UPSTASH_REDIS_REST_URL / _TOKEN) — los crea Vercel al conectar Upstash.
+//   Sin ellas el asistente funciona igual, pero sin historial.
 
 export const config = { maxDuration: 60 };
 
@@ -379,6 +382,63 @@ async function runTool(name, input, ctx) {
   }
 }
 
+/* ---------- HISTORIAL (Upstash Redis por REST, sin librerías) ---------- */
+const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+const hayHistorial = () => !!(KV_URL && KV_TOKEN);
+
+async function kv(...comando) {
+  const r = await fetch(KV_URL, { method: 'POST', headers: { Authorization: `Bearer ${KV_TOKEN}` }, body: JSON.stringify(comando) });
+  const d = await r.json();
+  if (d.error) throw new Error(`Historial: ${d.error}`);
+  return d.result;
+}
+const idValido = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{8,64}$/.test(id);
+
+async function guardarConversacion({ convId, me, nombre, esAdmin, mensajes }) {
+  if (!hayHistorial() || !idValido(convId)) return;
+  const clave = `conv:${convId}`;
+  const prev = await kv('GET', clave).then(v => v ? JSON.parse(v) : null).catch(() => null);
+  if (prev && prev.usuario !== me.username) return; // no pisar la conversación de otro
+  const ahora = new Date().toISOString();
+  const primero = mensajes.find(m => m.role === 'user')?.content || 'Conversación';
+  const conv = {
+    id: convId, usuario: me.username, nombre, rol: esAdmin ? 'supervisor' : 'tecnico',
+    creada: prev?.creada || ahora, actualizada: ahora,
+    titulo: prev?.titulo || primero.slice(0, 70),
+    mensajes: mensajes.slice(-200).map(m => ({ role: m.role, content: String(m.content).slice(0, 6000), ...(m.acciones?.length ? { acciones: m.acciones } : {}) })),
+  };
+  const score = Date.now();
+  await kv('SET', clave, JSON.stringify(conv));
+  await kv('ZADD', `convs:${me.username}`, score, convId);
+  await kv('ZADD', 'convs:todas', score, convId);
+}
+
+async function manejarHistorial(req, res, me, esAdmin) {
+  if (!hayHistorial()) return res.status(200).json({ historial: false, conversaciones: [] });
+  const q = req.query || {};
+  // Abrir una conversación
+  if (q.conv) {
+    if (!idValido(q.conv)) return res.status(400).json({ error: 'ID inválido' });
+    const v = await kv('GET', `conv:${q.conv}`);
+    if (!v) return res.status(404).json({ error: 'Conversación no encontrada' });
+    const conv = JSON.parse(v);
+    if (conv.usuario !== me.username && !esAdmin) return res.status(403).json({ error: 'No autorizado' });
+    return res.status(200).json({ ...conv, soloLectura: conv.usuario !== me.username });
+  }
+  // Listar (más recientes primero). El admin ve todas.
+  const lista = esAdmin ? 'convs:todas' : `convs:${me.username}`;
+  const ids = await kv('ZRANGE', lista, 0, 99, 'REV') || [];
+  const convs = [];
+  for (const id of ids) {
+    const v = await kv('GET', `conv:${id}`).catch(() => null);
+    if (!v) continue;
+    const c = JSON.parse(v);
+    convs.push({ id: c.id, titulo: c.titulo, nombre: c.nombre, usuario: c.usuario, actualizada: c.actualizada, mensajes: c.mensajes.length, propia: c.usuario === me.username });
+  }
+  return res.status(200).json({ historial: true, conversaciones: convs });
+}
+
 /* ---------- HANDLER ---------- */
 export default async function handler(req, res) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -391,13 +451,42 @@ export default async function handler(req, res) {
   const esAdmin = me.username === 'admin';
   const nombre = me.displayName || me.username || 'usuario';
 
-  // GET: el chat pregunta el rol para mostrar sus sugerencias
-  if (req.method === 'GET') return res.status(200).json({ rol: esAdmin ? 'supervisor' : 'tecnico', nombre });
+  // GET ?historial=1 / ?conv=ID → historial.  GET sin nada → rol (sugerencias del chat)
+  if (req.method === 'GET') {
+    const q = req.query || {};
+    if (q.historial || q.conv) {
+      try { return await manejarHistorial(req, res, me, esAdmin); }
+      catch (e) { return res.status(500).json({ error: e.message }); }
+    }
+    return res.status(200).json({ rol: esAdmin ? 'supervisor' : 'tecnico', nombre, historial: hayHistorial() });
+  }
+  // DELETE ?conv=ID → solo el admin borra conversaciones
+  if (req.method === 'DELETE') {
+    const id = (req.query || {}).conv;
+    if (!esAdmin) return res.status(403).json({ error: 'Solo el administrador puede borrar conversaciones' });
+    if (!hayHistorial() || !idValido(id)) return res.status(400).json({ error: 'No se puede borrar' });
+    const v = await kv('GET', `conv:${id}`).catch(() => null);
+    const usuario = v ? JSON.parse(v).usuario : null;
+    await kv('DEL', `conv:${id}`);
+    await kv('ZREM', 'convs:todas', id);
+    if (usuario) await kv('ZREM', `convs:${usuario}`, id);
+    return res.status(200).json({ ok: true });
+  }
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'Falta ANTHROPIC_API_KEY en Vercel' });
 
   const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
   const incoming = Array.isArray(body.messages) ? body.messages : [];
+  const convId = body.convId;
+  // Lo que se guarda en el historial: la conversación tal como la ve el usuario (+ la respuesta nueva)
+  const paraHistorial = incoming.filter(m => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
+  const responder = async (status, payload) => {
+    if (status === 200 && payload.reply) {
+      try { await guardarConversacion({ convId, me, nombre, esAdmin, mensajes: [...paraHistorial, { role: 'assistant', content: payload.reply, acciones: payload.acciones }] }); }
+      catch (e) { console.error('historial', e.message); } // si falla el historial, la respuesta igual llega
+    }
+    return res.status(status).json(payload);
+  };
   let messages = incoming
     .filter(m => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
     .slice(-20)
@@ -440,7 +529,7 @@ export default async function handler(req, res) {
         }
         if (afirmaSinHacer) reply += '\n\n⚠️ No se guardó ningún cambio.';
         if (data.stop_reason === 'max_tokens') reply += '…\n\n(respuesta recortada, pregunta algo más específico)';
-        return res.status(200).json({ reply: reply || '(sin respuesta)', changed, acciones });
+        return responder(200, { reply: reply || '(sin respuesta)', changed, acciones });
       }
 
       const results = [];
@@ -466,7 +555,7 @@ export default async function handler(req, res) {
       }
       messages.push({ role: 'user', content: results });
     }
-    return res.status(200).json({ reply: 'La consulta fue demasiado larga, intenta algo más específico.', changed, acciones });
+    return responder(200, { reply: 'La consulta fue demasiado larga, intenta algo más específico.', changed, acciones });
   } catch (e) {
     console.error('agent error', e);
     return res.status(500).json({ error: e.message, changed, acciones });
