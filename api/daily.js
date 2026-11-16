@@ -1,4 +1,6 @@
-// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v3.1
+// api/daily.js — Agente autónomo de Porta al Sole: resumen diario + patrones por Telegram — v3.3
+// v3.3: + envía por Telegram las novedades de la app que aún no se mandaron (ver api/_novedades.js)
+// v3.2: + mensaje diario propio para Ricardo (variable TELEGRAM_CHAT_ID_RICARDO)
 // v3.1: el preventivo de A/C mira solo el TÍTULO e ignora las verificaciones de entrada/salida/cambio
 // v3.0: + preventivo de A/C cada 4 meses (modo prueba / creación), reporte mensual el día 1, consumo por noche ocupada
 // v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
@@ -11,10 +13,13 @@
 //   AGENT_PASSWORD       contraseña de ese usuario
 //   TELEGRAM_BOT_TOKEN   token del bot (de @BotFather)
 //   TELEGRAM_CHAT_ID     tu chat id de Telegram
+//   TELEGRAM_CHAT_ID_RICARDO  chat id de Ricardo (opcional: si no está, no se le envía nada)
 //   CRON_SECRET          clave para que nadie más pueda ejecutarlo
 //   PREVENTIVO_CREAR     "si" para que el agente CREE las tareas de A/C (sin ella, solo informa = modo prueba)
 // Pruebas a mano:  /api/daily?secret=...            → resumen diario
 //                  /api/daily?secret=...&mensual=1  → además, el reporte mensual del mes anterior
+
+import { enviarNovedadesTelegram } from './novedades.js';
 
 export const config = { maxDuration: 60 };
 
@@ -95,12 +100,12 @@ function partir(text, max = 3800) {
   return partes;
 }
 
-async function telegram(text) {
+async function telegram(text, chatId = process.env.TELEGRAM_CHAT_ID) {
   for (const parte of partir(text)) {
     const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHAT_ID, text: parte, disable_web_page_preview: true }),
+      body: JSON.stringify({ chat_id: chatId, text: parte, disable_web_page_preview: true }),
     });
     const d = await r.json();
     if (!d.ok) throw new Error(`Telegram: ${d.description}`);
@@ -452,6 +457,39 @@ Usa solo los datos dados; no inventes tareas. Si una sección está vacía, omí
   return d.stop_reason === 'max_tokens' ? `${texto}…\n\n(resumen recortado)` : texto;
 }
 
+/* ---------- MENSAJE PARA RICARDO (técnico) ---------- */
+async function redactarRicardo(datos) {
+  // Solo lo operativo: sin desempeño, sin reporte mensual
+  const { fecha, totales, vencidas, vencenHoy, urgentes, estancadas, checkinsConPendientes, alojadosConUrgente,
+          huecos, consumoAnormal, preventivo, patrones } = datos;
+  const paraEl = { fecha, totales, vencidas, vencenHoy, urgentes, estancadas, checkinsConPendientes, alojadosConUrgente,
+    huecos, consumoAnormal, preventivoAC: { creadas: preventivo?.creadas || [] }, fallasRepetidas: patrones?.fallasRepetidas || [] };
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type':'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version':'2023-06-01' },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 3000,
+      system: `Eres el asistente de mantenimiento de "Porta al Sole" (townhouses de alquiler vacacional en Aruba, clima salino).
+Escribe el mensaje de la mañana para Ricardo, el encargado de mantenimiento, que lo leerá en Telegram desde el celular antes de empezar a trabajar.
+Tono: directo, práctico y amable, como un compañero de trabajo. Texto plano (sin markdown ni asteriscos), emojis como viñetas, en español. MUY BREVE: máximo 1200 caracteres.
+Estructura (omite las secciones vacías):
+👋 Buenos días Ricardo + una línea con lo principal del día.
+📋 Para hoy: tareas vencidas, que vencen hoy y urgentes, ordenadas por prioridad (formato "PAS 12 · Fuga lavamanos (#45)").
+🏠 Antes del check-in: qué dejar listo en las unidades que reciben huésped hoy/mañana/pasado, y unidades con huésped alojado y tarea urgente (avisar que hay huésped).
+💧 Revisar consumo: unidades con consumo anormal de agua o luz y qué revisar (inodoro que corre, fugas, A/C encendido).
+❄️ Preventivo A/C: tareas de mantenimiento de A/C creadas hoy para él.
+📅 Si hay huecos libres en unidades con pendientes, sugiere aprovecharlos.
+💡 Si hay fallas repetidas, un consejo técnico corto (1-2 líneas).
+NUNCA hables de su desempeño, tiempos de resolución, ingresos ni de Claudio. Usa solo los datos dados; no inventes tareas.`,
+      messages: [{ role: 'user', content: `Datos de hoy:\n${JSON.stringify(paraEl)}` }],
+    }),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d?.error?.message || `Anthropic ${r.status}`);
+  return d.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+}
+
 /* ---------- HANDLER ---------- */
 export default async function handler(req, res) {
   // Seguridad: Vercel Cron envía "Authorization: Bearer CRON_SECRET". Para probar a mano: /api/daily?secret=...
@@ -479,6 +517,19 @@ export default async function handler(req, res) {
     const texto = await redactar(datos);
     await telegram(texto);
 
+    // Mensaje propio para Ricardo (si su chat id está configurado). Si falla, no afecta al de Claudio.
+    let ricardo = 'no configurado';
+    if (process.env.TELEGRAM_CHAT_ID_RICARDO) {
+      try { await telegram(await redactarRicardo(datos), process.env.TELEGRAM_CHAT_ID_RICARDO); ricardo = 'enviado'; }
+      catch (e) { ricardo = `error: ${e.message}`; try { await telegram(`⚠️ No pude enviar el mensaje de Ricardo: ${e.message}`); } catch {} }
+    }
+
+    // Novedades de la app pendientes de avisar por Telegram (si falla, no afecta al resumen)
+    let novedades = 'sin base de datos';
+    if (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) {
+      try { novedades = await enviarNovedadesTelegram(); } catch (e) { novedades = `error: ${e.message}`; }
+    }
+
     // Reporte mensual: el día 1 de cada mes (o a mano con &mensual=1)
     let mensual = false;
     if (hoy.endsWith('-01') || (req.query && req.query.mensual)) {
@@ -486,7 +537,7 @@ export default async function handler(req, res) {
       mensual = true;
     }
     // En la respuesta del navegador se ve qué detectó del A/C por unidad (para verificar)
-    return res.status(200).json({ ok: true, enviado: texto.length, mensual, totales: datos.totales, preventivoAC: listaAC.map(({ uid, ...x }) => x), preventivo });
+    return res.status(200).json({ ok: true, enviado: texto.length, ricardo, novedades, mensual, totales: datos.totales, preventivoAC: listaAC.map(({ uid, ...x }) => x), preventivo });
   } catch (e) {
     console.error('daily error', e);
     try { await telegram(`⚠️ El agente de Porta al Sole no pudo generar el resumen de hoy: ${e.message}`); } catch {}
