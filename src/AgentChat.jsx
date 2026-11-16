@@ -1,4 +1,5 @@
-// src/AgentChat.jsx — Chat del Agente IA de Porta al Sole — v2.0
+// src/AgentChat.jsx — Chat del Agente IA de Porta al Sole — v2.1
+// v2.1: muestra en verde lo que el servidor confirma que se guardó (✅ Tarea #… creada)
 // Novedades: sugerencias según el rol (supervisor / técnico) y dictado por voz 🎤
 import React, { useState, useRef, useEffect } from 'react';
 
@@ -79,11 +80,11 @@ export default function AgentChat({ token, onChanged }) {
       const r = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ messages: next.filter(m => !m.error) }),
+        body: JSON.stringify({ messages: next.filter(m => !m.error).map(m => ({ role: m.role, content: m.content })) }),
       });
       const d = await r.json().catch(() => ({ error: `Error ${r.status}` }));
       if (!r.ok) throw new Error(d.error || `Error ${r.status}`);
-      setMsgs(m => [...m, { role: 'assistant', content: d.reply }]);
+      setMsgs(m => [...m, { role: 'assistant', content: d.reply, acciones: d.acciones || [] }]);
       if (d.changed && onChanged) onChanged();
     } catch (e) {
       setMsgs(m => [...m, { role: 'assistant', content: `⚠️ ${e.message}`, error: true }]);
@@ -146,7 +147,20 @@ export default function AgentChat({ token, onChanged }) {
             ...(m.role === 'user'
               ? { background: 'var(--gold)', color: '#1a1208', borderBottomRightRadius: 4 }
               : { background: 'var(--surface)', color: m.error ? '#b83232' : 'var(--text)', border: '1px solid var(--border)', borderBottomLeftRadius: 4 }),
-          }}>{formatear(m.content)}</div>
+          }}>
+            {formatear(m.content)}
+            {m.acciones?.length > 0 && (
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {m.acciones.map((a, j) => (
+                  <div key={j} style={{
+                    fontSize: 12.5, fontWeight: 600, padding: '6px 9px', borderRadius: 8,
+                    background: a.startsWith('❌') ? 'rgba(184,50,50,.12)' : 'rgba(45,110,78,.13)',
+                    color: a.startsWith('❌') ? '#b83232' : 'var(--done, #2d6e4e)',
+                  }}>{a}</div>
+                ))}
+              </div>
+            )}
+          </div>
         ))}
         {busy && (
           <div style={{ alignSelf: 'flex-start', padding: '10px 14px', borderRadius: 14, background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 13, opacity: .7 }}>Pensando…</div>
