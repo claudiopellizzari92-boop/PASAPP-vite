@@ -1,4 +1,6 @@
-// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.2
+// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.3
+// v2.3: el servidor comprueba lo que se guardó de verdad (avisos ✅), corrige si el modelo dice "hecho" sin guardar,
+//       Ricardo crea tareas sin "¿Confirmo?", y aviso de unidades que no existen
 // v2.2: alertas de consumo por noche ocupada (igual que la pestaña Registros)
 // v2.1: noches del consumo de agua = semana ANTERIOR a la lectura (igual que la pestaña Registros)
 // Roles: admin = supervisor (Claudio) · resto = técnico (Ricardo)
@@ -72,11 +74,14 @@ DATOS DEL COMPLEJO
 
 REGLAS
 1. Para consultar, usa las herramientas; nunca inventes tareas, reservas ni consumos.
-2. ANTES de crear o modificar una tarea, muestra un resumen corto de lo que vas a guardar y pregunta "¿Confirmo?". Solo ejecuta crear_tarea / actualizar_tarea / agregar_nota cuando el usuario confirme (sí, dale, ok...).
-3. Si falta la unidad o qué pasa, pregúntalo. Deduce lo demás con sentido común (fuga → plomeria; no enfría → hvac) e indícalo en el resumen.
-4. No puedes borrar tareas: se hace desde la app.
-5. Al listar tareas usa formato compacto: "PAS 12 · N2 · Plomería — Fuga lavamanos (urgente, pendiente) #45".
-6. Si una unidad con tareas abiertas tiene check-in en los próximos 2 días, menciónalo.`;
+2. ${esAdmin
+    ? 'ANTES de crear o modificar una tarea, muestra un resumen corto y pregunta "¿Confirmo?". Solo ejecuta crear_tarea / actualizar_tarea / agregar_nota cuando confirme (sí, dale, ok...).'
+    : 'Si la unidad y el problema están claros, ejecuta crear_tarea / actualizar_tarea / agregar_nota DIRECTAMENTE, sin pedir confirmación, y luego muestra en una línea lo que guardaste. Si algo no está claro, pregunta.'}
+3. NUNCA digas que creaste, actualizaste o anotaste algo si no llamaste a la herramienta en este mismo turno. Lo que no pasa por la herramienta NO se guarda.
+4. Unidades que NO existen: 5, 6, 7 y 9 (y PAS 17 está vendida). Si el usuario nombra una de esas, díselo y pregunta a qué unidad se refiere; no crees nada. Si falta la unidad o qué pasa, pregúntalo. Deduce lo demás con sentido común (fuga → plomeria; ventana/puerta → carpinteria; no enfría → hvac).
+5. No puedes borrar tareas: se hace desde la app.
+6. Al listar tareas usa formato compacto: "PAS 12 · N2 · Plomería — Fuga lavamanos (urgente, pendiente) #45".
+7. Si una unidad con tareas abiertas tiene check-in en los próximos 2 días, menciónalo.`;
 }
 
 /* ---------- HERRAMIENTAS ---------- */
@@ -404,6 +409,9 @@ export default async function handler(req, res) {
   const tools = buildTools(esAdmin);
   const system = systemPrompt(nombre, esAdmin);
   let changed = false;
+  const acciones = [];      // lo que se guardó DE VERDAD (lo devuelve el servidor, no el modelo)
+  let corregido = false;    // ya se le pidió corregirse una vez
+  const DICE_HECHO = /\b(cread[ao]s?|hecho|list[oa]|guardad[ao]s?|anotad[ao]s?|registrad[ao]s?|actualizad[ao]s?|agregad[ao]s?|marcad[ao]s?)\b/i;
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -423,8 +431,16 @@ export default async function handler(req, res) {
 
       if (data.stop_reason !== 'tool_use') {
         let reply = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+        // ¿Dice que hizo algo, pero no se guardó nada y no está preguntando? → pedirle que se corrija (una vez)
+        const afirmaSinHacer = !acciones.length && DICE_HECHO.test(reply) && !/\?\s*$/.test(reply);
+        if (afirmaSinHacer && !corregido) {
+          corregido = true;
+          messages.push({ role: 'user', content: '[Aviso del sistema, no del usuario] Dijiste que hiciste un cambio, pero NO llamaste a ninguna herramienta, así que no se guardó nada. Si ya tienes la unidad (que exista) y el problema, llama ahora a la herramienta. Si falta un dato o la unidad no existe, explícalo y pregunta. No digas que algo está hecho sin llamar a la herramienta.' });
+          continue;
+        }
+        if (afirmaSinHacer) reply += '\n\n⚠️ No se guardó ningún cambio.';
         if (data.stop_reason === 'max_tokens') reply += '…\n\n(respuesta recortada, pregunta algo más específico)';
-        return res.status(200).json({ reply: reply || '(sin respuesta)', changed });
+        return res.status(200).json({ reply: reply || '(sin respuesta)', changed, acciones });
       }
 
       const results = [];
@@ -433,17 +449,26 @@ export default async function handler(req, res) {
         let out;
         try {
           out = await runTool(b.name, b.input, ctx);
-          if (['crear_tarea','actualizar_tarea','agregar_nota'].includes(b.name) && out?.ok) changed = true;
+          if (['crear_tarea','actualizar_tarea','agregar_nota'].includes(b.name) && out?.ok) {
+            changed = true;
+            const t = out.tarea || {};
+            acciones.push(
+              b.name === 'crear_tarea' ? `✅ Tarea #${t.id ?? '?'} creada: ${t.unidad || ''} · ${t.titulo || ''}`
+              : b.name === 'actualizar_tarea' ? `✅ Tarea #${t.id ?? b.input?.id} actualizada${b.input?.status ? ` (estado: ${b.input.status})` : ''}`
+              : `✅ Nota agregada a la tarea #${b.input?.id}`
+            );
+          }
         } catch (e) {
           out = { error: e.message };
+          if (['crear_tarea','actualizar_tarea','agregar_nota'].includes(b.name)) acciones.push(`❌ No se pudo guardar: ${e.message}`);
         }
         results.push({ type: 'tool_result', tool_use_id: b.id, content: JSON.stringify(out) });
       }
       messages.push({ role: 'user', content: results });
     }
-    return res.status(200).json({ reply: 'La consulta fue demasiado larga, intenta algo más específico.', changed });
+    return res.status(200).json({ reply: 'La consulta fue demasiado larga, intenta algo más específico.', changed, acciones });
   } catch (e) {
     console.error('agent error', e);
-    return res.status(500).json({ error: e.message, changed });
+    return res.status(500).json({ error: e.message, changed, acciones });
   }
 }
