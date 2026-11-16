@@ -1,4 +1,5 @@
-// src/AgentChat.jsx — Chat del Agente IA de Porta al Sole — v2.2
+// src/AgentChat.jsx — Chat del Agente IA de Porta al Sole — v2.3
+// v2.3: ventana 🎁 Novedades al entrar (si hay algo sin ver) + botón 🎁 en el asistente para verlas de nuevo
 // v2.2: historial de conversaciones 🕘 (cada uno ve lo suyo; el admin ve todo, lee las de Ricardo y puede borrar)
 // v2.1: muestra en verde lo que el servidor confirma que se guardó (✅ Tarea #… creada)
 // v2.0: sugerencias según el rol (supervisor / técnico) y dictado por voz 🎤
@@ -48,6 +49,7 @@ export default function AgentChat({ token, onChanged }) {
   const [convs, setConvs] = useState(null);
   const [cargandoHist, setCargandoHist] = useState(false);
   const [listening, setListening] = useState(false);
+  const [novedades, setNovedades] = useState(null);   // { lista, ultima, soloNuevas }
   const endRef = useRef(null);
   const inputRef = useRef(null);
   const recRef = useRef(null);
@@ -67,6 +69,49 @@ export default function AgentChat({ token, onChanged }) {
       .then(d => { setRol(d?.rol || 'tecnico'); setConHistorial(!!d?.historial); })
       .catch(() => setRol('tecnico'));
   }, [open, rol, token]);
+
+  // Novedades: al entrar a la app, mostrar las que el usuario aún no vio
+  const cargarNovedades = async (todas = false) => {
+    try {
+      const r = await fetch('/api/novedades', { headers: auth });
+      if (!r.ok) return;
+      const d = await r.json();
+      const lista = todas ? d.novedades : (d.novedades || []).filter(n => (d.noVistas || []).includes(n.id));
+      if (lista.length) setNovedades({ lista, ultima: d.ultima, soloNuevas: !todas });
+    } catch {}
+  };
+  useEffect(() => { if (token) cargarNovedades(false); }, [token]);
+  const cerrarNovedades = async () => {
+    const n = novedades; setNovedades(null);
+    if (n?.soloNuevas) {
+      try { await fetch('/api/novedades', { method: 'POST', headers: { 'Content-Type': 'application/json', ...auth }, body: JSON.stringify({ visto: n.ultima }) }); } catch {}
+    }
+  };
+
+  const ventanaNovedades = novedades && (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 1100, background: 'rgba(0,0,0,.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18 }}>
+      <div style={{ width: '100%', maxWidth: 400, maxHeight: '85%', display: 'flex', flexDirection: 'column', background: 'var(--surface)', color: 'var(--text)', borderRadius: 16, boxShadow: '0 12px 40px rgba(0,0,0,.4)', overflow: 'hidden' }}>
+        <div style={{ padding: '16px 18px 10px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ fontFamily: 'var(--serif)', fontWeight: 700, fontSize: 19, color: 'var(--gold)' }}>🎁 Novedades</div>
+          <div style={{ fontSize: 12, opacity: .65 }}>{novedades.soloNuevas ? 'Lo nuevo en la app desde tu última visita' : 'Todas las novedades de la app'}</div>
+        </div>
+        <div style={{ overflowY: 'auto', padding: '12px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {novedades.lista.map(n => (
+            <div key={n.id}>
+              <div style={{ fontWeight: 700, fontSize: 14.5 }}>{n.titulo}</div>
+              <div style={{ fontSize: 11, opacity: .55, marginBottom: 5 }}>{n.fecha}</div>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {n.puntos.map((p, i) => <li key={i} style={{ fontSize: 13.5, lineHeight: 1.45 }}>{p}</li>)}
+              </ul>
+            </div>
+          ))}
+        </div>
+        <div style={{ padding: 14, borderTop: '1px solid var(--border)' }}>
+          <button onClick={cerrarNovedades} style={{ width: '100%', padding: 12, border: 'none', borderRadius: 10, background: 'var(--gold)', color: '#1a1208', fontWeight: 700, fontSize: 14, cursor: 'pointer', fontFamily: 'var(--sans)' }}>Entendido</button>
+        </div>
+      </div>
+    </div>
+  );
 
   // Detener el micrófono al cerrar el chat
   useEffect(() => { if (!open) stopMic(); }, [open]);
@@ -163,13 +208,14 @@ export default function AgentChat({ token, onChanged }) {
     boxShadow: '0 6px 20px rgba(201,150,58,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center',
   };
 
-  if (!open) return (
+  if (!open) return (<>
+    {ventanaNovedades}
     <button style={fab} onClick={() => setOpen(true)} aria-label="Asistente IA">
       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/>
       </svg>
     </button>
-  );
+  </>);
 
   const sugerencias = SUGERENCIAS[rol] || [];
   const intro = rol === 'supervisor'
@@ -191,6 +237,9 @@ export default function AgentChat({ token, onChanged }) {
             {vista === 'historial' ? (esAdmin ? 'Todas las conversaciones' : 'Tus conversaciones') : 'Mantenimiento Porta al Sole'}
           </div>
         </div>
+        {vista === 'chat' && (
+          <button onClick={() => cargarNovedades(true)} disabled={busy} style={btnGhost} aria-label="Novedades">🎁</button>
+        )}
         {vista === 'chat' && conHistorial && (
           <button onClick={abrirHistorial} disabled={busy} style={btnGhost} aria-label="Historial">🕘</button>
         )}
@@ -301,6 +350,7 @@ export default function AgentChat({ token, onChanged }) {
           </button>
         </div>
       )}
+      {ventanaNovedades}
       <style>{`@keyframes agentPulse{0%,100%{opacity:1}50%{opacity:.55}}`}</style>
     </div>
   );
