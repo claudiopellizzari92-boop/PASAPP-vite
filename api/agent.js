@@ -1,4 +1,6 @@
-// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.4
+// api/agent.js — Agente IA de Porta al Sole (Vercel Serverless Function) — v2.5
+// v2.5: el control de "dijo que lo hizo pero no lo guardó" solo actúa si el usuario pidió un cambio
+//       y la respuesta afirma haberlo hecho (antes se activaba con simples consultas)
 // v2.4: historial de conversaciones en Upstash Redis (cada uno ve lo suyo; el admin ve todo)
 // v2.3: el servidor comprueba lo que se guardó de verdad (avisos ✅), corrige si el modelo dice "hecho" sin guardar,
 //       Ricardo crea tareas sin "¿Confirmo?", y aviso de unidades que no existen
@@ -500,7 +502,14 @@ export default async function handler(req, res) {
   let changed = false;
   const acciones = [];      // lo que se guardó DE VERDAD (lo devuelve el servidor, no el modelo)
   let corregido = false;    // ya se le pidió corregirse una vez
-  const DICE_HECHO = /\b(cread[ao]s?|hecho|list[oa]|guardad[ao]s?|anotad[ao]s?|registrad[ao]s?|actualizad[ao]s?|agregad[ao]s?|marcad[ao]s?)\b/i;
+  let respuestaOriginal = null;
+  // ¿El usuario pidió un cambio? (último mensaje)
+  const ultimoUsuario = [...messages].reverse().find(m => m.role === 'user' && typeof m.content === 'string')?.content || '';
+  const B = '(?<![\\wáéíóúñ])', E = '(?![\\wáéíóúñ])'; // límites de palabra que entienden acentos
+  const PIDE_CAMBIO = new RegExp(`${B}(crea|crear|créame|creame|anota|anotar|apunta|apúntalo|registra|registrar|agrega|agregar|añade|marca|marcar|cambia|cambiar|actualiza|actualizar|completa|completar|cierra|cerrar|asigna|asignar|pon|poner|mueve)${E}|^\\s*(sí|si|dale|ok|okey|confirmo|confirmado|hazlo|adelante|de una)${E}`, 'i');
+  const pidioCambio = PIDE_CAMBIO.test(ultimoUsuario);
+  // ¿La respuesta afirma, en primera persona, que ya lo hizo?
+  const DICE_HECHO = new RegExp(`${B}(creé|he creado|anoté|registré|agregué|actualicé|guardé|marqué|cambié|completé|asigné)${E}|${B}(ya )?(quedó|quedo|está|esta) (cread|anotad|registrad|agregad|actualizad|guardad|marcad|completad|asignad)[ao]s?${E}|${B}está hecho${E}|${B}list[oa][,.!]? *(la )?(tarea|nota|qued)`, 'i');
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -521,13 +530,16 @@ export default async function handler(req, res) {
       if (data.stop_reason !== 'tool_use') {
         let reply = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
         // ¿Dice que hizo algo, pero no se guardó nada y no está preguntando? → pedirle que se corrija (una vez)
-        const afirmaSinHacer = !acciones.length && DICE_HECHO.test(reply) && !/\?\s*$/.test(reply);
+        const afirmaSinHacer = pidioCambio && !acciones.length && DICE_HECHO.test(reply) && !/\?\s*$/.test(reply);
         if (afirmaSinHacer && !corregido) {
           corregido = true;
+          respuestaOriginal = reply;
           messages.push({ role: 'user', content: '[Aviso del sistema, no del usuario] Dijiste que hiciste un cambio, pero NO llamaste a ninguna herramienta, así que no se guardó nada. Si ya tienes la unidad (que exista) y el problema, llama ahora a la herramienta. Si falta un dato o la unidad no existe, explícalo y pregunta. No digas que algo está hecho sin llamar a la herramienta.' });
           continue;
         }
-        if (afirmaSinHacer) reply += '\n\n⚠️ No se guardó ningún cambio.';
+        // Si se le pidió corregirse y aun así no guardó nada, se muestra su respuesta ORIGINAL con el aviso
+        // (si en la corrección está preguntando algo —p. ej. "¿qué unidad?"— se deja esa pregunta)
+        if (corregido && !acciones.length && respuestaOriginal && !/\?\s*$/.test(reply)) reply = `${respuestaOriginal}\n\n⚠️ No se guardó ningún cambio.`;
         if (data.stop_reason === 'max_tokens') reply += '…\n\n(respuesta recortada, pregunta algo más específico)';
         return responder(200, { reply: reply || '(sin respuesta)', changed, acciones });
       }
