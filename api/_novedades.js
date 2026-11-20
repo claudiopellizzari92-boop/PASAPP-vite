@@ -7,6 +7,17 @@
 
 export const NOVEDADES = [
   {
+    id: 4,
+    fecha: '2026-11-20',
+    para: 'todos',
+    titulo: 'Elige qué facturas descargar',
+    puntos: [
+      'En Facturas, cada factura tiene ahora una casilla ☐ a la izquierda.',
+      'Marca las que necesites y pulsa "⬇ Descargar (2)": baja solo esas, con su propio total.',
+      'Si no marcas ninguna, el botón dice "Descargar todas" y funciona como siempre.',
+    ],
+  },
+  {
     id: 3,
     fecha: '2026-11-16',
     para: 'supervisor',
