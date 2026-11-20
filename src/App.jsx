@@ -1,3 +1,4 @@
+// src/App.jsx — Porta al Sole — 2026-11-20: casillas para elegir qué facturas descargar
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import './styles.css';
 import AgentChat from './AgentChat.jsx';
@@ -8158,6 +8159,7 @@ function InvoicesScreen() {
   const [fileName,setFileName]= useState('');
   const [filtro,  setFiltro]  = useState('all'); // 'all' | 'mbl' | 'condominio'
   const [dlBusy,  setDlBusy]  = useState('');
+  const [sel,     setSel]     = useState({});    // facturas marcadas para descargar { id: true }
   const [editInv, setEditInv] = useState(null);  // factura en edición
   const [editBusy,setEditBusy]= useState(false);
 
@@ -8307,7 +8309,7 @@ function InvoicesScreen() {
   // Archivo mensual para entregar a la administración correspondiente.
   // Mismo formato que el archivo de tareas: HTML con las fotos incrustadas en
   // base64, que se abre con el diálogo de impresión para guardar como PDF.
-  const descargarMes = async (mesKey, dest, facturas) => {
+  const descargarMes = async (mesKey, dest, facturas, esSeleccion = false) => {
     setDlBusy(mesKey+dest);
     const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
     const [yy,mm] = mesKey.split('-');
@@ -8384,7 +8386,7 @@ function InvoicesScreen() {
     table,tr,td,th,.card{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 </style></head><body>
 <div class="sub">Porta Al Sole · Rendición de facturas</div>
-<h1>${destTxt} — ${mesLabel}</h1>
+<h1>${destTxt} — ${mesLabel}${esSeleccion?' <span style="font-size:14px;color:#8b7355;font-weight:400">(selección)</span>':''}</h1>
 <div class="meta">${facturas.length} factura${facturas.length!==1?'s':''} · Total ${fmtAwg(totalAwg)} (${fmtUsd(totalAwg)})</div>
 
 <table>
@@ -8411,9 +8413,11 @@ ${fotos}
     const blob = new Blob([html],{type:'text/html'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `facturas-${dest}-${mesKey}.html`;
+    a.download = `facturas-${dest}-${mesKey}${esSeleccion?'-seleccion':''}.html`;
     a.click();
     setDlBusy('');
+    // Limpiar la selección de las facturas que se acaban de descargar
+    if (esSeleccion) setSel(prev => { const n = {...prev}; facturas.forEach(f => delete n[f.id]); return n; });
   };
   const fmtAwg = n => 'ƒ'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   const fmtUsd = n => '$'+(Number(n)/AWG_USD).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -8623,6 +8627,7 @@ ${fotos}
                           const total = grupo.reduce((s,f)=>s+(Number(f.amountAwg)||0),0);
                           const col = destColor(dk==='sin'?null:dk);
                           const bajando = dlBusy===mk+dk;
+                          const elegidas = grupo.filter(f=>sel[f.id]);
                           return (
                             <div key={dk} style={{marginBottom:10}}>
                               <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,flexWrap:'wrap'}}>
@@ -8634,12 +8639,18 @@ ${fotos}
                                   {grupo.length} · {fmtAwg(total)}
                                 </span>
                                 <span style={{flex:1}}/>
+                                {dk!=='sin'&&elegidas.length>0&&(
+                                  <button onClick={()=>setSel(prev=>{ const n={...prev}; grupo.forEach(f=>delete n[f.id]); return n; })}
+                                    style={{background:'none',border:'none',color:'var(--muted)',fontSize:10,cursor:'pointer',textDecoration:'underline',padding:'0 2px',flexShrink:0}}>
+                                    Quitar selección
+                                  </button>
+                                )}
                                 {dk!=='sin'&&(
-                                  <button onClick={()=>descargarMes(mk, dk, grupo)} disabled={!!dlBusy}
-                                    style={{background:'var(--bg)',color:'var(--gold)',border:'1px solid var(--gold)',
+                                  <button onClick={()=>elegidas.length ? descargarMes(mk, dk, elegidas, true) : descargarMes(mk, dk, grupo)} disabled={!!dlBusy}
+                                    style={{background:elegidas.length?'var(--gold)':'var(--bg)',color:elegidas.length?'#1a1208':'var(--gold)',border:'1px solid var(--gold)',
                                       borderRadius:8,padding:'5px 11px',fontSize:10,fontWeight:800,
                                       cursor:dlBusy?'default':'pointer',flexShrink:0}}>
-                                    {bajando?'Preparando...':'⬇ Descargar'}
+                                    {bajando?'Preparando...':elegidas.length?`⬇ Descargar (${elegidas.length})`:'⬇ Descargar todas'}
                                   </button>
                                 )}
                               </div>
@@ -8648,7 +8659,18 @@ ${fotos}
                                 {grupo.map(inv=>(
                                   <div key={inv.id} style={{display:'flex',gap:10,alignItems:'flex-start',background:'var(--surface)',
                                     border:'1px solid var(--border)',borderLeft:`3px solid ${destColor(inv.destino)}`,
-                                    borderRadius:12,padding:'9px 11px'}}>
+                                    borderRadius:12,padding:'9px 11px',
+                                    ...(sel[inv.id]?{background:'var(--gold-dim)',borderColor:'var(--gold)'}:{})}}>
+                                    {dk!=='sin'&&(
+                                      <button onClick={e=>{e.stopPropagation();setSel(prev=>{ const n={...prev}; if(n[inv.id]) delete n[inv.id]; else n[inv.id]=true; return n; });}}
+                                        title={sel[inv.id]?'Quitar de la descarga':'Elegir para descargar'} aria-label="Seleccionar factura"
+                                        style={{width:22,height:22,flexShrink:0,alignSelf:'center',borderRadius:6,cursor:'pointer',padding:0,
+                                          border:`1.5px solid ${sel[inv.id]?'var(--gold)':'var(--border)'}`,
+                                          background:sel[inv.id]?'var(--gold)':'transparent',color:'#1a1208',
+                                          fontSize:13,fontWeight:900,lineHeight:'19px'}}>
+                                        {sel[inv.id]?'✓':''}
+                                      </button>
+                                    )}
                                     <div onClick={()=>inv.fileType==='pdf'
                                             ? window.open(inv.photoUrl,'_blank')
                                             : setLightbox(inv.photoUrl)}
