@@ -7,6 +7,17 @@
 
 export const NOVEDADES = [
   {
+    id: 5,
+    fecha: '2026-11-24',
+    para: 'todos',
+    titulo: 'Facturas en PDF, también en iPhone',
+    puntos: [
+      'El botón "Descargar" de Facturas ahora genera un PDF de verdad (antes era una página web).',
+      'En el celular aparece "PDF listo": toca "Compartir / Guardar" para mandarlo por WhatsApp, correo o guardarlo en Archivos.',
+      'En la computadora el PDF se descarga directo.',
+    ],
+  },
+  {
     id: 4,
     fecha: '2026-11-20',
     para: 'todos',
