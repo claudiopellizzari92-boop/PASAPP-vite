@@ -1,4 +1,5 @@
-// src/App.jsx — Porta al Sole — 2026-11-20: casillas para elegir qué facturas descargar
+// src/App.jsx — Porta al Sole — 2026-11-24: las facturas se descargan como PDF real (también en iPhone)
+// 2026-11-20: casillas para elegir qué facturas descargar
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import './styles.css';
 import AgentChat from './AgentChat.jsx';
@@ -8160,6 +8161,7 @@ function InvoicesScreen() {
   const [filtro,  setFiltro]  = useState('all'); // 'all' | 'mbl' | 'condominio'
   const [dlBusy,  setDlBusy]  = useState('');
   const [sel,     setSel]     = useState({});    // facturas marcadas para descargar { id: true }
+  const [pdfListo,setPdfListo]= useState(null);  // { file, url, nombre } — en celular, para compartir con un toque
   const [editInv, setEditInv] = useState(null);  // factura en edición
   const [editBusy,setEditBusy]= useState(false);
 
@@ -8307,118 +8309,157 @@ function InvoicesScreen() {
   };
 
   // Archivo mensual para entregar a la administración correspondiente.
-  // Mismo formato que el archivo de tareas: HTML con las fotos incrustadas en
-  // base64, que se abre con el diálogo de impresión para guardar como PDF.
+  // Genera un PDF REAL en el navegador (jsPDF): página 1 con la tabla y el total,
+  // y después un comprobante por página. En celular se abre el menú Compartir
+  // (Guardar en Archivos, WhatsApp, correo...); en computadora se descarga.
+  const esMovil = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+
+  // Imagen → JPEG en base64 + medidas (sirve para fotos y para páginas de PDF de Cloudinary)
+  const cargarImagen = async url => {
+    try {
+      let src = url;
+      if (!String(url).startsWith('data:')) {
+        const fuente = String(url).includes('/upload/') && !String(url).includes('/upload/pg_')
+          ? String(url).replace('/upload/', '/upload/f_jpg,w_1400,q_auto/') : url;
+        const blob = await (await fetch(fuente)).blob();
+        src = await new Promise(res=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.readAsDataURL(blob); });
+      }
+      const img = await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=src; });
+      const max = 1400, k = Math.min(1, max/Math.max(img.width,img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width*k); c.height = Math.round(img.height*k);
+      const ctx = c.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height);
+      ctx.drawImage(img,0,0,c.width,c.height);
+      return { data: c.toDataURL('image/jpeg',0.82), w: c.width, h: c.height };
+    } catch { return null; }
+  };
+
   const descargarMes = async (mesKey, dest, facturas, esSeleccion = false) => {
     setDlBusy(mesKey+dest);
-    const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-    const [yy,mm] = mesKey.split('-');
-    const mesLabel = `${MESES[parseInt(mm,10)-1]} ${yy}`;
-    const destTxt  = destLabel(dest);
+    try {
+      const { jsPDF } = await import('jspdf');
+      const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+      const [yy,mm] = mesKey.split('-');
+      const mesLabel = `${MESES[parseInt(mm,10)-1]} ${yy}`;
+      const destTxt  = destLabel(dest);
+      const totalAwg = facturas.reduce((s,f)=>s+(Number(f.amountAwg)||0),0);
 
-    const toBase64 = async url => {
-      try {
-        const r = await fetch(url);
-        const blob = await r.blob();
-        return await new Promise(res=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.readAsDataURL(blob); });
-      } catch { return null; }
-    };
-    // Un PDF de 3 páginas aporta 3 imágenes: así la administración recibe la
-    // factura completa en un solo documento, sin tener que abrir adjuntos.
-    const paginasDe = inv => inv.fileType==='pdf'
-      ? Array.from({length: Math.max(1, inv.pageCount||1)}, (_,i)=>pdfPagina(inv.photoUrl, i+1, 1200))
-      : [inv.photoUrl];
+      // Un PDF de 3 páginas aporta 3 imágenes: la administración recibe la factura completa
+      const paginasDe = inv => inv.fileType==='pdf'
+        ? Array.from({length: Math.max(1, inv.pageCount||1)}, (_,i)=>pdfPagina(inv.photoUrl, i+1, 1200))
+        : [inv.photoUrl];
+      const conFoto = await Promise.all(facturas.map(async f=>({
+        ...f, imgs: (await Promise.all(paginasDe(f).map(cargarImagen))).filter(Boolean),
+      })));
 
-    const conFoto = await Promise.all(facturas.map(async f=>({
-      ...f,
-      b64s: (await Promise.all(paginasDe(f).map(toBase64))).filter(Boolean),
-    })));
+      const doc = new jsPDF({ unit:'mm', format:'a4' });
+      const W = 210, H = 297, M = 14;
+      const ORO = [201,150,58], MARRON = [139,115,85], TINTA = [26,18,8], LINEA = [228,217,200];
+      const generado = new Date().toLocaleDateString('es-VE',{day:'2-digit',month:'long',year:'numeric'});
+      const pie = () => {
+        doc.setDrawColor(...LINEA); doc.line(M, H-12, W-M, H-12);
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...MARRON);
+        doc.text('Porta Al Sole Condos · Aruba', M, H-7.5);
+        doc.text(`Generado el ${generado} · pág. ${doc.getNumberOfPages()}`, W-M, H-7.5, { align:'right' });
+      };
 
-    const totalAwg = facturas.reduce((s,f)=>s+(Number(f.amountAwg)||0),0);
-    const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      // ── Página 1: encabezado + tabla ──
+      let y = M + 2;
+      doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...MARRON);
+      doc.text('PORTA AL SOLE · RENDICIÓN DE FACTURAS', M, y); y += 8;
+      doc.setFontSize(19); doc.setTextColor(...TINTA);
+      doc.text(`${destTxt} — ${mesLabel}${esSeleccion?' (selección)':''}`, M, y); y += 6;
+      doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(...MARRON);
+      doc.text(`${facturas.length} factura${facturas.length!==1?'s':''} · Total ${fmtAwg(totalAwg)} (${fmtUsd(totalAwg)})`, M, y); y += 8;
 
-    const filas = conFoto.map((f,i)=>`<tr>
-      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;color:#8b7355">${i+1}</td>
-      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:12px;font-weight:600">${esc(f.vendor)}</td>
-      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;color:#5a4a35">${esc(f.notes)}</td>
-      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;color:#8b7355;white-space:nowrap">${fmtFecha(f.createdAt)}</td>
-      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:12px;text-align:right;font-weight:700;white-space:nowrap">${f.amountAwg!=null?fmtAwg(f.amountAwg):'—'}</td>
-      <td style="padding:7px 9px;border-bottom:1px solid #f0e8da;font-size:11px;text-align:right;color:#8b7355;white-space:nowrap">${f.amountAwg!=null?fmtUsd(f.amountAwg):''}</td>
-    </tr>`).join('');
+      const col = { n:M, prov:M+8, det:M+50, fecha:M+112, awg:W-M-22, usd:W-M };
+      const encabezado = () => {
+        doc.setFillColor(247,242,235); doc.rect(M, y-4.5, W-2*M, 7, 'F');
+        doc.setDrawColor(...ORO); doc.setLineWidth(0.5); doc.line(M, y+2.5, W-M, y+2.5); doc.setLineWidth(0.2);
+        doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...MARRON);
+        doc.text('#', col.n, y); doc.text('PROVEEDOR', col.prov, y); doc.text('DETALLE', col.det, y); doc.text('FECHA', col.fecha, y);
+        doc.text('MONTO ƒ', col.awg, y, {align:'right'}); doc.text('USD', col.usd, y, {align:'right'});
+        y += 7;
+      };
+      encabezado();
+      conFoto.forEach((f,i)=>{
+        doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+        const prov = doc.splitTextToSize(f.vendor||'(sin proveedor)', 40);
+        const det  = doc.splitTextToSize(f.notes||'', 60);
+        const alto = Math.max(prov.length, det.length, 1) * 3.8 + 2.5;
+        if (y + alto > H - 22) { pie(); doc.addPage(); y = M + 6; encabezado(); }
+        doc.setTextColor(...MARRON); doc.text(String(i+1), col.n, y);
+        doc.setTextColor(...TINTA); doc.setFont('helvetica','bold'); doc.text(prov, col.prov, y);
+        doc.setFont('helvetica','normal'); doc.setTextColor(90,74,53); doc.text(det, col.det, y);
+        doc.setTextColor(...MARRON); doc.text(fmtFecha(f.createdAt), col.fecha, y);
+        doc.setTextColor(...TINTA); doc.setFont('helvetica','bold');
+        doc.text(f.amountAwg!=null?fmtAwg(f.amountAwg):'—', col.awg, y, {align:'right'});
+        doc.setFont('helvetica','normal'); doc.setTextColor(...MARRON);
+        doc.text(f.amountAwg!=null?fmtUsd(f.amountAwg):'', col.usd, y, {align:'right'});
+        y += alto - 2.5; doc.setDrawColor(240,232,218); doc.line(M, y-1, W-M, y-1); y += 3.5;
+      });
+      if (y + 10 > H - 22) { pie(); doc.addPage(); y = M + 6; }
+      doc.setFillColor(251,246,236); doc.rect(M, y-4.5, W-2*M, 8, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor(...ORO);
+      doc.text('TOTAL', col.n, y+0.5); doc.text(fmtAwg(totalAwg), col.awg, y+0.5, {align:'right'}); doc.text(fmtUsd(totalAwg), col.usd, y+0.5, {align:'right'});
+      pie();
 
-    const fotos = conFoto.map((f,i)=>`
-      <div class="card">
-        <div class="card-h">
-          <span class="num">#${i+1}</span>
-          <span class="ven">${esc(f.vendor)}${f.b64s.length>1?` <span class="pg">${f.b64s.length} páginas</span>`:''}</span>
-          <span class="amt">${f.amountAwg!=null?fmtAwg(f.amountAwg):''}</span>
-        </div>
-        ${f.notes?`<div class="note">${esc(f.notes)}</div>`:''}
-        ${f.b64s.length
-          ? f.b64s.map((b,j)=>`<img src="${b}"/>${f.b64s.length>1?`<div class="pgl">Página ${j+1} de ${f.b64s.length}</div>`:''}`).join('')
-          : `<div class="miss">No se pudo incrustar el archivo. Ver: ${esc(f.photoUrl)}</div>`}
-      </div>`).join('');
+      // ── Comprobantes: una imagen por página ──
+      conFoto.forEach((f,i)=>{
+        const total = f.imgs.length;
+        (total ? f.imgs : [null]).forEach((img,j)=>{
+          doc.addPage(); let yy2 = M + 4;
+          doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...ORO); doc.text(`#${i+1}`, M, yy2);
+          doc.setFontSize(13); doc.setTextColor(...TINTA); doc.text(doc.splitTextToSize(f.vendor||'(sin proveedor)', 120)[0], M+10, yy2);
+          if (f.amountAwg!=null) doc.text(fmtAwg(f.amountAwg), W-M, yy2, {align:'right'});
+          yy2 += 5.5;
+          doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(90,74,53);
+          const sub = [f.notes, fmtFecha(f.createdAt), total>1?`Página ${j+1} de ${total}`:''].filter(Boolean).join(' · ');
+          const lineas = doc.splitTextToSize(sub, W-2*M).slice(0,3); doc.text(lineas, M, yy2); yy2 += lineas.length*3.8 + 3;
+          if (img) {
+            const maxW = W-2*M, maxH = H-14-yy2-4;
+            const k = Math.min(maxW/img.w, maxH/img.h);
+            const w = img.w*k, h = img.h*k;
+            doc.addImage(img.data, 'JPEG', M + (maxW-w)/2, yy2, w, h, undefined, 'FAST');
+          } else {
+            doc.setTextColor(184,50,50); doc.text(doc.splitTextToSize(`No se pudo incluir el archivo. Ver: ${f.photoUrl}`, W-2*M), M, yy2+4);
+          }
+          pie();
+        });
+      });
 
-    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
-<title>Facturas ${destTxt} — ${mesLabel}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:Georgia,serif;background:#fff;color:#1a1208;padding:30px;max-width:820px;margin:0 auto}
-  .sub{font-size:10px;color:#8b7355;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:4px}
-  h1{font-size:25px;margin-bottom:3px}
-  .meta{font-size:12px;color:#8b7355;margin-bottom:20px}
-  table{width:100%;border-collapse:collapse;border:1px solid #e4d9c8;margin-bottom:8px}
-  th{padding:8px 9px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#8b7355;background:#f7f2eb;border-bottom:2px solid #c9963a;text-align:left}
-  .tot{background:#fbf6ec;font-weight:800;color:#c9963a}
-  .card{border:1px solid #e4d9c8;border-radius:9px;padding:12px;margin-bottom:14px;page-break-inside:avoid}
-  .card-h{display:flex;align-items:baseline;gap:9px;margin-bottom:6px}
-  .num{font-size:10px;font-weight:800;color:#c9963a}
-  .ven{font-size:14px;font-weight:700;flex:1}
-  .amt{font-size:13px;font-weight:800}
-  .note{font-size:11px;color:#5a4a35;margin-bottom:7px}
-  .card img{width:100%;max-height:640px;object-fit:contain;border-radius:6px;display:block;background:#f7f2eb;margin-bottom:4px}
-  .pg{font-size:9px;font-weight:400;color:#8b7355;background:#f7f2eb;border-radius:4px;padding:1px 6px;margin-left:4px}
-  .pgl{font-size:9px;color:#a99a80;text-align:right;margin-bottom:8px}
-  .miss{font-size:10px;color:#b83232;word-break:break-all}
-  h2{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:#c9963a;margin:26px 0 12px;padding-bottom:6px;border-bottom:1px solid #e4d9c8}
-  .foot{margin-top:26px;padding-top:12px;border-top:1px solid #e4d9c8;font-size:9px;color:#a99a80;display:flex;justify-content:space-between}
-  @media print{body{padding:14px}@page{margin:1.2cm}
-    table,tr,td,th,.card{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
-</style></head><body>
-<div class="sub">Porta Al Sole · Rendición de facturas</div>
-<h1>${destTxt} — ${mesLabel}${esSeleccion?' <span style="font-size:14px;color:#8b7355;font-weight:400">(selección)</span>':''}</h1>
-<div class="meta">${facturas.length} factura${facturas.length!==1?'s':''} · Total ${fmtAwg(totalAwg)} (${fmtUsd(totalAwg)})</div>
-
-<table>
-  <thead><tr><th>#</th><th>Proveedor</th><th>Detalle</th><th>Fecha</th><th style="text-align:right">Monto ƒ</th><th style="text-align:right">USD</th></tr></thead>
-  <tbody>${filas}
-    <tr class="tot">
-      <td colspan="4" style="padding:9px">TOTAL</td>
-      <td style="padding:9px;text-align:right;white-space:nowrap">${fmtAwg(totalAwg)}</td>
-      <td style="padding:9px;text-align:right;white-space:nowrap">${fmtUsd(totalAwg)}</td>
-    </tr>
-  </tbody>
-</table>
-
-<h2>Comprobantes</h2>
-${fotos}
-
-<div class="foot">
-  <span>Porta Al Sole Condos · Aruba</span>
-  <span>Generado el ${new Date().toLocaleDateString('es-VE',{day:'2-digit',month:'long',year:'numeric'})}</span>
-</div>
-<script>window.onload=()=>window.print()<\/script>
-</body></html>`;
-
-    const blob = new Blob([html],{type:'text/html'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `facturas-${dest}-${mesKey}${esSeleccion?'-seleccion':''}.html`;
-    a.click();
-    setDlBusy('');
-    // Limpiar la selección de las facturas que se acaban de descargar
-    if (esSeleccion) setSel(prev => { const n = {...prev}; facturas.forEach(f => delete n[f.id]); return n; });
+      const nombre = `facturas-${dest}-${mesKey}${esSeleccion?'-seleccion':''}.pdf`;
+      const blob = doc.output('blob');
+      const file = new File([blob], nombre, { type:'application/pdf' });
+      if (esMovil) {
+        // En celular: botón "Compartir / Guardar" (el menú Compartir necesita un toque directo del usuario)
+        setPdfListo({ file, url: URL.createObjectURL(blob), nombre });
+      } else {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = nombre; a.click();
+        setTimeout(()=>URL.revokeObjectURL(a.href), 60000);
+      }
+      // Limpiar la selección de las facturas que se acaban de descargar
+      if (esSeleccion) setSel(prev => { const n = {...prev}; facturas.forEach(f => delete n[f.id]); return n; });
+    } catch (e) {
+      alert('No se pudo generar el PDF: ' + (e?.message || e));
+    } finally {
+      setDlBusy('');
+    }
   };
+
+  const compartirPdf = async () => {
+    const p = pdfListo; if (!p) return;
+    try {
+      if (navigator.canShare && navigator.canShare({ files:[p.file] })) {
+        await navigator.share({ files:[p.file], title: p.nombre });
+        setPdfListo(null); return;
+      }
+    } catch (e) { if (e?.name === 'AbortError') return; }
+    // Si el celular no permite compartir archivos: abrir el PDF (desde ahí se guarda o comparte)
+    window.open(p.url, '_blank');
+  };
+
   const fmtAwg = n => 'ƒ'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   const fmtUsd = n => '$'+(Number(n)/AWG_USD).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -8730,6 +8771,27 @@ ${fotos}
           )}
         </div>
       </div>
+
+      {/* ── PDF listo (celular): compartir / guardar con un toque ── */}
+      {pdfListo&&(
+        <div className="overlay" style={{alignItems:'center'}} onClick={e=>e.target===e.currentTarget&&setPdfListo(null)}>
+          <div style={{background:'var(--surface)',borderRadius:14,padding:'20px 18px',maxWidth:340,width:'90%',textAlign:'center'}}>
+            <div style={{fontSize:34,marginBottom:6}}>📄</div>
+            <div style={{fontSize:16,fontWeight:700,fontFamily:'var(--serif)',marginBottom:4}}>PDF listo</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginBottom:14,wordBreak:'break-all'}}>{pdfListo.nombre}</div>
+            <button onClick={compartirPdf}
+              style={{width:'100%',padding:12,border:'none',borderRadius:10,background:'var(--gold)',color:'#1a1208',fontWeight:800,fontSize:14,cursor:'pointer',marginBottom:8}}>
+              Compartir / Guardar
+            </button>
+            <button onClick={()=>window.open(pdfListo.url,'_blank')}
+              style={{width:'100%',padding:10,borderRadius:10,background:'transparent',border:'1px solid var(--border)',color:'var(--text)',fontSize:13,cursor:'pointer',marginBottom:8}}>
+              Ver PDF
+            </button>
+            <button onClick={()=>setPdfListo(null)}
+              style={{background:'none',border:'none',color:'var(--muted)',fontSize:12,cursor:'pointer'}}>Cerrar</button>
+          </div>
+        </div>
+      )}
 
       {/* ── Editar factura ── */}
       {editInv&&(
